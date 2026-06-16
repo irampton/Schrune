@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { addLcscPart } = require("./src/lcsc");
 
 function stripComments(source) {
     return source.replace(/\/\/.*$/gm, "");
@@ -1703,11 +1704,47 @@ function writeStep1JavaScript(filePath) {
     }
 }
 
-function main() {
-    const keepJs = process.argv.includes("--keep-js");
-    const inputFile = process.argv.slice(2).find((arg) => arg !== "--keep-js");
+function usage() {
+    return [
+        "Usage:",
+        "  node app.js build [--keep-js] <file.schrune>",
+        "  node app.js add <CXXXX>",
+        "",
+        "Compatibility:",
+        "  node app.js [--keep-js] <file.schrune>",
+    ].join("\n");
+}
+
+async function main() {
+    const args = process.argv.slice(2);
+    const command = args[0] && !args[0].startsWith("--") && path.extname(args[0]) !== ".schrune"
+        ? args.shift()
+        : "build";
+
+    if (command === "add") {
+        const partNumber = args[0];
+        if (!partNumber) {
+            throw new Error(usage());
+        }
+
+        const result = await addLcscPart(partNumber);
+        console.log(`Added ${result.partName}`);
+        console.log(`Part file: ${result.schrunePath}`);
+        console.log(`Pins: ${result.pins.length}`);
+        if (!result.modelDownloaded) {
+            console.log("3D STEP model payload was not directly downloadable.");
+        }
+        return;
+    }
+
+    if (command !== "build") {
+        throw new Error(usage());
+    }
+
+    const keepJs = args.includes("--keep-js");
+    const inputFile = args.find((arg) => arg !== "--keep-js");
     if (!inputFile || path.extname(inputFile) !== ".schrune") {
-        throw new Error("Specify a .schrune file");
+        throw new Error(usage());
     }
 
     const inputPath = path.resolve(process.cwd(), inputFile);
@@ -1723,15 +1760,14 @@ function main() {
 }
 
 if (require.main === module) {
-    try {
-        main();
-    } catch (error) {
+    main().catch((error) => {
         console.error(error.message);
         process.exitCode = 1;
-    }
+    });
 }
 
 module.exports = {
     step1,
     writeStep1JavaScript,
+    main,
 };

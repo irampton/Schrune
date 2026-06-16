@@ -2,6 +2,24 @@
 
 This file descibes the steps of the Schrune Compiler. The goal is to translate a .schrune file into a KiCad Schmatic.
 
+## CLI Commands
+
+The compiler entry point is `app.js`.
+
+```
+node app.js build [--keep-js] path/to/file.schrune
+node app.js add C2040
+```
+
+`build` runs the current compiler flow. `--keep-js` keeps the Step 1 JavaScript
+files next to the source `.schrune` files.
+
+`add` imports an LCSC part into `./parts/<PartName>/`. It downloads the EasyEDA
+component data, writes KiCad symbol and footprint files (`.kicad_sym` and
+`.kicad_mod`), attempts to download the 3D model as a `.step`, and writes a
+`<PartName>.schrune` file with component metadata and pin mappings. If the STEP
+payload is not directly available, the part is generated without a model file.
+
 ## Step 1 - Compile to JS
 
 In this step the compiler turns the .schrune file(s) into a vaild Node.JS file that outputs a list of componets and nets.
