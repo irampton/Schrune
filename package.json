@@ -1,0 +1,5 @@
+{
+  "scripts": {
+    "tests": "node --test"
+  }
+}
