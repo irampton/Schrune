@@ -1273,21 +1273,8 @@ function collectTopDeclarations(statements) {
     return { declarations, nameOverrides };
 }
 
-function renderPrimitiveClass(name) {
-    const template = createPrimitiveTemplates().get(name);
-    return `class ${name} {\n` +
-        `    constructor(params = {}) {\n` +
-        `        if (!("value" in params)) {\n` +
-        `            throw new Error(${jsString(`${name} requires a value`)});\n` +
-        `        }\n` +
-        `        this.info = ${renderObjectLiteral(template.info, 8)};\n` +
-        `        this.info.footprint = params.footprint || this.info.footprint;\n` +
-        `        this.value = params.value;\n` +
-        `        this.footprint = params.footprint;\n` +
-        `        this.pins = [];\n` +
-        `${renderPinTemplateAssignments(template.pins, "this.pins").join("\n")}\n` +
-        `    }\n` +
-        `}\n`;
+function primitiveIncludeFileName(name) {
+    return `${name.toLowerCase()}.js`;
 }
 
 function renderConstructorArgs(args) {
@@ -1645,7 +1632,11 @@ function renderTopJavaScript(filePath) {
     const primitiveNames = [...source.matchAll(/\bnew\s+([A-Za-z_]\w*)\s*\(/g)]
         .map((match) => match[1])
         .filter((name) => createPrimitiveTemplates().has(name) && !includeNames.has(name));
-    const primitiveClasses = [...new Set(primitiveNames)].map(renderPrimitiveClass);
+    const primitiveRequireLines = [...new Set(primitiveNames)].map((name) => {
+        const includePath = path.join(__dirname, "src", "include", primitiveIncludeFileName(name));
+        const relativePath = `./${path.relative(inputDir, includePath).replace(/\\/g, "/").replace(/\.js$/, "")}`;
+        return `const ${name} = require(${jsString(relativePath)});`;
+    });
     const declarationLines = declarations.map((declaration) => {
         if (declaration.kind === "net") {
             const finalName = nameOverrides.get(declaration.name) || declaration.defaultName;
@@ -1664,8 +1655,9 @@ function renderTopJavaScript(filePath) {
 
     return [
         ...requireLines,
-        requireLines.length && primitiveClasses.length ? "" : undefined,
-        ...primitiveClasses,
+        requireLines.length && primitiveRequireLines.length ? "" : undefined,
+        ...primitiveRequireLines,
+        requireLines.length || primitiveRequireLines.length ? "" : undefined,
         "function top() {",
         renderRuntimeHelpers().trimEnd(),
         "",

@@ -195,8 +195,10 @@ This first pass does not generate a JS file on disk. It compiles the specified
 
 Run the top() module in the specified .schrune file, or other specified module. Pass the output to Step 3.
 
-## Step 3 - Generate KiCad Schmatic
+## Step 3 - Generate BOM
+
+Fill out the baisc componets, generate a BOM, and prepare to make a schmatic.
+
+## Step 4 - Generate KiCad Schmatic
 
 Take the module level output and turn that into a KiCad schmatic. This includes grabbing LSCS data, if needed.
-
-## Step 4 - Generate BOM

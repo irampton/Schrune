@@ -140,6 +140,8 @@ module top () {
         writeStep1JavaScript(fixture.filePath);
 
         const generated = fs.readFileSync(path.join(fixture.dir, "fixture.js"), "utf8");
+        assert.match(generated, /const Resistor = require\(".+src\/include\/resistor"\);/);
+        assert.doesNotMatch(generated, /class Resistor/);
         assert.match(generated, /for \(let i = 0; i < parts\.length; i\+\+\)/);
         assert.match(generated, /if \(i < 2\)/);
 
@@ -448,16 +450,16 @@ test("compiles example2 through Step 1 arrays and loops", () => {
     assert.equal(result.nets.cs, "BTN1");
 
     assert.equal(result.components.length, 15);
-    assert.equal(result.components[0].constructor.name, "BOOMELE_2_54_2_3P");
+    assert.equal(result.components[0].constructor.name, "P_2_54_2_3P");
     assert.equal(result.components[0].pins[5].net, "3V3");
-    assert.equal(result.components[1].constructor.name, "Texas_Instruments_SN74HC165N");
+    assert.equal(result.components[1].constructor.name, "SN74HC165N");
     assert.equal(result.components[1].pins.VCC.net, "3V3");
     assert.equal(result.components[1].pins.GND.net, "GND");
     assert.equal(result.components[2].constructor.name, "Capacitor");
     assert.equal(result.components[2].value, "100nF +/- 10%");
     assert.equal(result.components[2].pins[0].net, "3V3");
     assert.equal(result.components[2].pins[1].net, "GND");
-    assert.equal(result.components[3].constructor.name, "BOURNS_PEC11R_4020F_S0024");
+    assert.equal(result.components[3].constructor.name, "PEC11R_4020F_S0024");
     assert.equal(result.components[3].pins.A.net, "pullupResistors_0_1");
     assert.equal(result.components[3].pins[4].net, "pullupResistors_2_1");
     assert.equal(result.components[5].pins[4].net, "encoders_2_4");
