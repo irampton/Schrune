@@ -6,10 +6,13 @@ const test = require("node:test");
 const {
     addLcscPart,
     extractPinsFromEasyEdaSymbol,
+    isLikelyStepModel,
+    modelDownloadCandidates,
     sanitizeIdentifier,
 } = require("../src/lcsc");
 
 function response(body, ok = true, status = 200) {
+    const bodyBuffer = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
     return {
         ok,
         status,
@@ -17,7 +20,10 @@ function response(body, ok = true, status = 200) {
             return body;
         },
         async arrayBuffer() {
-            return Buffer.from(String(body)).buffer;
+            return bodyBuffer.buffer.slice(
+                bodyBuffer.byteOffset,
+                bodyBuffer.byteOffset + bodyBuffer.byteLength
+            );
         },
     };
 }
@@ -103,6 +109,51 @@ test("adds an LCSC part into parts with KiCad files and Schrune file", async () 
 
         const footprint = fs.readFileSync(path.join(partDir, "ACME_123.kicad_mod"), "utf8");
         assert.match(footprint, /\(footprint "ACME_123"/);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("tries the EasyEDA STEP endpoint before legacy model URLs", () => {
+    const candidates = modelDownloadCandidates(easyEdaComponent.result);
+    assert.equal(
+        candidates[0],
+        "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/model-uuid"
+    );
+});
+
+test("rejects empty or error payloads as STEP models", () => {
+    assert.equal(isLikelyStepModel(Buffer.alloc(0)), false);
+    assert.equal(isLikelyStepModel(Buffer.from("<Error>NoSuchKey</Error>")), false);
+    assert.equal(isLikelyStepModel(Buffer.from('{"error":"not found"}')), false);
+    assert.equal(isLikelyStepModel(Buffer.from("ISO-10303-21;\nENDSEC;\nEND-ISO-10303-21;")), true);
+});
+
+test("downloads STEP model and references it from Schrune and KiCad footprint", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-lcsc-model-"));
+    const step = Buffer.from("ISO-10303-21;\nHEADER;\nENDSEC;\nEND-ISO-10303-21;\n");
+    const fetch = async (url) => {
+        if (String(url).includes("/api/products/C1234/components")) {
+            return response(easyEdaComponent);
+        }
+        if (String(url) === "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/model-uuid") {
+            return response(step);
+        }
+        return response("not found", false, 404);
+    };
+
+    try {
+        const result = await addLcscPart("C1234", { cwd: dir, fetch });
+        const partDir = path.join(dir, "parts", "ACME_123");
+
+        assert.equal(result.modelDownloaded, true);
+        assert.equal(fs.readFileSync(path.join(partDir, "ACME_123.step"), "utf8"), step.toString("utf8"));
+
+        const schrune = fs.readFileSync(path.join(partDir, "ACME_123.schrune"), "utf8");
+        assert.match(schrune, /model: "\.\/ACME_123\.step"/);
+
+        const footprint = fs.readFileSync(path.join(partDir, "ACME_123.kicad_mod"), "utf8");
+        assert.match(footprint, /\(model "\$\{KIPRJMOD\}\/parts\/ACME_123\/ACME_123\.step"/);
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }

@@ -16,9 +16,11 @@ files next to the source `.schrune` files.
 
 `add` imports an LCSC part into `./parts/<PartName>/`. It downloads the EasyEDA
 component data, writes KiCad symbol and footprint files (`.kicad_sym` and
-`.kicad_mod`), attempts to download the 3D model as a `.step`, and writes a
-`<PartName>.schrune` file with component metadata and pin mappings. If the STEP
-payload is not directly available, the part is generated without a model file.
+`.kicad_mod`), attempts to download the 3D model as a `.step` through EasyEDA's
+model UUID endpoint, and writes a `<PartName>.schrune` file with component
+metadata and pin mappings. If the STEP payload is empty, an EasyEDA error
+document, or otherwise not directly available, the part is generated without a
+model file.
 
 ## Step 1 - Compile to JS
 

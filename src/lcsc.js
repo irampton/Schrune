@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const EASYEDA_COMPONENT_API = "https://easyeda.com/api/products";
+const EASYEDA_STEP_MODEL_API = "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y";
 
 function assertLcscPartNumber(partNumber) {
     if (!/^C\d+$/i.test(partNumber)) {
@@ -52,6 +53,23 @@ async function fetchBuffer(url, fetchImpl = globalThis.fetch) {
     }
 
     return Buffer.from(await response.arrayBuffer());
+}
+
+function isLikelyStepModel(content) {
+    if (!Buffer.isBuffer(content) || content.length === 0) {
+        return false;
+    }
+
+    const header = content.subarray(0, Math.min(content.length, 256)).toString("utf8").trimStart();
+    if (!header) {
+        return false;
+    }
+
+    if (/^(<\?xml|<Error|<!doctype|<html|\{|\[)/i.test(header)) {
+        return false;
+    }
+
+    return header.startsWith("ISO-10303-21") || header.includes("ISO-10303-21");
 }
 
 async function fetchEasyEdaComponent(partNumber, options = {}) {
@@ -285,6 +303,7 @@ function modelDownloadCandidates(component) {
     }
 
     return [
+        `${EASYEDA_STEP_MODEL_API}/${uuid}`,
         `https://modules.easyeda.com/${uuid}`,
         `https://modules.easyeda.com/${uuid}.step`,
         `https://modules.easyeda.com/${uuid}.STEP`,
@@ -308,6 +327,9 @@ async function tryDownloadModel(component, destinationDir, partName, options = {
     for (const url of candidates) {
         try {
             const content = await fetchBuffer(url, options.fetch);
+            if (!isLikelyStepModel(content)) {
+                throw new Error(`Response was not a STEP model: ${url}`);
+            }
             const outputPath = path.join(destinationDir, `${partName}.step`);
             fs.writeFileSync(outputPath, content);
             return {
@@ -368,6 +390,8 @@ module.exports = {
     addLcscPart,
     extractPinsFromEasyEdaSymbol,
     fetchEasyEdaComponent,
+    isLikelyStepModel,
+    modelDownloadCandidates,
     parseEasyEdaPads,
     renderKiCadFootprint,
     renderKiCadSymbol,
