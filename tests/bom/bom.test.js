@@ -3,8 +3,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { assignDesignators, step1, step3 } = require("../app");
-const { lockPathFor } = require("../src/bom");
+const { assignDesignators, step1, step3 } = require("../../app");
+const { bomCsv, lockPathFor, makeBomRows, readPartsLock } = require("../../src/bom");
 
 function makeFixture(source) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-bom-"));
@@ -156,4 +156,82 @@ test("step3 selects unlocked generic parts and updates parts-lock", async () => 
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
+});
+
+test("step3 can skip parts-lock writes", async () => {
+    const { fixture, compiled } = compile(`module top () {
+    r1 = new Resistor(value = "10k", footprint = "0603");
+}
+`);
+
+    try {
+        const result = await step3(fixture.filePath, compiled, {
+            noPartsLock: true,
+            downloadParts: false,
+            selectPart: async () => ({
+                lcsc: "C25804",
+                manufacturer: "YAGEO",
+                mpn: "RC0603FR-0710KL",
+                package: "0603",
+            }),
+        });
+
+        assert.equal(result.components[0].info.LCSC, "C25804");
+        assert.equal(fs.existsSync(lockPathFor(fixture.filePath)), false);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("readPartsLock returns an empty normalized lock when none exists", () => {
+    const fixture = makeFixture("module top () {}\n");
+    try {
+        assert.deepEqual(readPartsLock(fixture.filePath), {
+            version: 1,
+            parts: [],
+            selectors: {},
+        });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("BOM rows group equivalent components and CSV escapes fields", () => {
+    const rows = makeBomRows({
+        components: [
+            {
+                designator: "R1",
+                constructor: { name: "Resistor" },
+                value: "10k",
+                footprint: "0603",
+                info: {},
+                selectedPart: {
+                    lcsc: "C25804",
+                    manufacturer: "YAGEO",
+                    mpn: "RC0603FR-0710KL",
+                    package: "0603",
+                    description: 'precision, "thin film"',
+                },
+            },
+            {
+                designator: "R2",
+                constructor: { name: "Resistor" },
+                value: "10k",
+                footprint: "0603",
+                info: {},
+                selectedPart: {
+                    lcsc: "C25804",
+                    manufacturer: "YAGEO",
+                    mpn: "RC0603FR-0710KL",
+                    package: "0603",
+                    description: 'precision, "thin film"',
+                },
+            },
+        ],
+    });
+
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0].designators, ["R1", "R2"]);
+    assert.equal(rows[0].quantity, 2);
+    assert.match(bomCsv(rows), /R1 R2,2,YAGEO,RC0603FR-0710KL,C25804,10k,0603,Resistor,"precision, ""thin film"""/);
 });

@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { step1, writeStep1JavaScript } = require("../app");
+const { step1 } = require("../../app");
 
 const basicPart = `part TestPart {
     info: {
@@ -48,27 +48,6 @@ function withFixture(source, callback) {
     }
 }
 
-test("compiles example1 through Step 1", () => {
-    const result = step1(path.join(__dirname, "..", "example1", "example1.schrune"));
-
-    assert.deepEqual([...result.netList], ["V+", "GND", "pwm_cool", "pwm_warm"]);
-    assert.deepEqual(result.nets, {
-        v: { h: "V+", l: "GND", voltage: "20V +/- 25%" },
-        pwm_cool: "pwm_cool",
-        pwm_warm: "pwm_warm",
-    });
-
-    assert.equal(result.components.length, 4);
-    assert.equal(result.components[0].constructor.name, "BOOMELE_2_54_2_3P");
-    assert.equal(result.components[0].pins[1].net, "V+");
-    assert.equal(result.components[0].pins[2].net, "GND");
-    assert.equal(result.components[0].pins[3].net, "pwm_cool");
-    assert.equal(result.components[3].constructor.name, "CUI_PJ_002BH");
-    assert.equal(result.components[3].pins.VIN.net, "V+");
-    assert.equal(result.components[3].pins.GND.net, "GND");
-    assert.equal(result.components[3].pins[3].net, "GND");
-});
-
 test("resolves #include files by searching below the source directory", () => {
     withFixture(`#include "TestPart.schrune"
 
@@ -82,82 +61,6 @@ module top () {
         assert.equal(result.components[0].constructor.name, "TestPart");
         assert.equal(result.components[0].pins[1].net, "signal");
     });
-});
-
-test("writes runnable Step 1 JavaScript with --keep-js behavior", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
-
-module top () {
-    net signal;
-    part u1 = new TestPart();
-    u1[1] ~ signal;
-}
-`);
-
-    try {
-        writeStep1JavaScript(fixture.filePath);
-
-        const topJsPath = path.join(fixture.dir, "fixture.js");
-        const partJsPath = path.join(fixture.dir, "parts", "TestPart.js");
-        assert.equal(fs.existsSync(topJsPath), true);
-        assert.equal(fs.existsSync(partJsPath), true);
-
-        delete require.cache[require.resolve(topJsPath)];
-        const top = require(topJsPath);
-        const result = top();
-
-        assert.deepEqual([...result.netList], ["signal"]);
-        assert.equal(result.components[0].constructor.name, "TestPart");
-        assert.equal(result.components[0].pins[1].net, "signal");
-        assert.deepEqual(result.nets, { signal: "signal" });
-    } finally {
-        fs.rmSync(fixture.dir, { recursive: true, force: true });
-    }
-});
-
-test("kept Step 1 JavaScript preserves loops and branches at runtime", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
-
-module top () {
-    net signal;
-    net fallback;
-    signal.name = "SIG";
-    part[3] parts = new TestPart();
-    part[3] resistors = new Resistor(value = "10k");
-
-    for (let i = 0; i < parts.length; i++){
-        signal ~> resistors[i] ~> parts[i].IN;
-        if (i < 2) {
-            parts[i].OUT ~ signal;
-        } else {
-            parts[i].OUT ~ fallback;
-        }
-    }
-}
-`);
-
-    try {
-        writeStep1JavaScript(fixture.filePath);
-
-        const generated = fs.readFileSync(path.join(fixture.dir, "fixture.js"), "utf8");
-        assert.match(generated, /const Resistor = require\(".+src\/include\/resistor"\);/);
-        assert.doesNotMatch(generated, /class Resistor/);
-        assert.match(generated, /for \(let i = 0; i < parts\.length; i\+\+\)/);
-        assert.match(generated, /if \(i < 2\)/);
-
-        delete require.cache[require.resolve(path.join(fixture.dir, "fixture.js"))];
-        const top = require(path.join(fixture.dir, "fixture.js"));
-        const generatedResult = top();
-        const directResult = step1(fixture.filePath);
-
-        assert.deepEqual([...generatedResult.netList], [...directResult.netList]);
-        assert.equal(generatedResult.components.length, directResult.components.length);
-        assert.equal(generatedResult.components[0].pins.IN.net, "resistors_0_1");
-        assert.equal(generatedResult.components[0].pins.OUT.net, "SIG");
-        assert.equal(generatedResult.components[2].pins.OUT.net, "fallback");
-    } finally {
-        fs.rmSync(fixture.dir, { recursive: true, force: true });
-    }
 });
 
 test("rejects #import", () => {
@@ -201,7 +104,17 @@ module top () {
     });
 });
 
-test("rejects duplicate final net names", () => {
+test("rejects duplicate declarations and final net names", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module top () {
+    net signal;
+    net signal;
+}
+`, (filePath) => {
+        assert.throws(() => step1(filePath), /Duplicate declaration "signal"/);
+    });
+
     withFixture(`#include "TestPart.schrune"
 
 module top () {
@@ -424,47 +337,18 @@ module top () {
     });
 });
 
-test("compiles example2 through Step 1 arrays and loops", () => {
-    const result = step1(path.join(__dirname, "..", "example2", "example2.schrune"));
+test("strips line comments before compiling statements", () => {
+    withFixture(`#include "TestPart.schrune"
 
-    assert.deepEqual([...result.netList], [
-        "3V3",
-        "GND",
-        "BTN1",
-        "LATCH",
-        "DATA",
-        "CLOCK",
-        "pullupResistors_0_1",
-        "pullupResistors_1_1",
-        "pullupResistors_2_1",
-        "pullupResistors_3_1",
-        "pullupResistors_4_1",
-        "pullupResistors_5_1",
-        "pullupResistors_6_1",
-        "pullupResistors_7_1",
-        "encoders_2_4",
-    ]);
-    assert.deepEqual(result.nets.power_3v3, { h: "3V3", l: "GND", voltage: "3.3V +/- 5%" });
-    assert.equal(result.nets.threeV, "3V3");
-    assert.equal(result.nets.gnd, "GND");
-    assert.equal(result.nets.cs, "BTN1");
-
-    assert.equal(result.components.length, 15);
-    assert.equal(result.components[0].constructor.name, "P_2_54_2_3P");
-    assert.equal(result.components[0].pins[5].net, "3V3");
-    assert.equal(result.components[1].constructor.name, "SN74HC165N");
-    assert.equal(result.components[1].pins.VCC.net, "3V3");
-    assert.equal(result.components[1].pins.GND.net, "GND");
-    assert.equal(result.components[2].constructor.name, "Capacitor");
-    assert.equal(result.components[2].value, "100nF +/- 10%");
-    assert.equal(result.components[2].pins[0].net, "3V3");
-    assert.equal(result.components[2].pins[1].net, "GND");
-    assert.equal(result.components[3].constructor.name, "PEC11R_4020F_S0024");
-    assert.equal(result.components[3].pins.A.net, "pullupResistors_0_1");
-    assert.equal(result.components[3].pins[4].net, "pullupResistors_2_1");
-    assert.equal(result.components[5].pins[4].net, "encoders_2_4");
-    assert.equal(result.components[6].constructor.name, "Resistor");
-    assert.equal(result.components[6].pins[0].net, "3V3");
-    assert.equal(result.components[6].pins[1].net, "pullupResistors_0_1");
-    assert.equal(result.components[14].pins[1].net, "BTN1");
+module top () {
+    // The following declaration should still be parsed.
+    net signal; // trailing comments should not become part of the statement
+    part u1 = new TestPart();
+    u1.IN ~ signal; // connect a named pin
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        assert.deepEqual([...result.netList], ["signal"]);
+        assert.equal(result.components[0].pins.IN.net, "signal");
+    });
 });

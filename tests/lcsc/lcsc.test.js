@@ -8,8 +8,10 @@ const {
     extractPinsFromEasyEdaSymbol,
     isLikelyStepModel,
     modelDownloadCandidates,
+    parseEasyEdaPads,
+    renderKiCadFootprint,
     sanitizeIdentifier,
-} = require("../src/lcsc");
+} = require("../../src/lcsc");
 
 function response(body, ok = true, status = 200) {
     const bodyBuffer = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
@@ -52,14 +54,16 @@ const easyEdaComponent = {
             dataStr: {
                 head: {
                     uuid_3d: "model-uuid",
+                    x: 10,
+                    y: 20,
                 },
-                shape: ["PAD~RECT~0~0~1~1~1~~1"],
+                shape: ["PAD~RECT~12~24~1.5~2~1~~1~~~90"],
             },
         },
     },
 };
 
-test("extracts EasyEDA symbol pins and uniquifies generated Schrune names", async () => {
+test("extracts EasyEDA symbol pins and sanitizes generated Schrune names", () => {
     const pins = extractPinsFromEasyEdaSymbol(easyEdaComponent.result.dataStr);
     assert.deepEqual(pins, [
         { name: "VCC", pad: "1" },
@@ -68,6 +72,8 @@ test("extracts EasyEDA symbol pins and uniquifies generated Schrune names", asyn
     ]);
 
     assert.equal(sanitizeIdentifier("ACME-123"), "ACME_123");
+    assert.equal(sanitizeIdentifier("123 resistor"), "P_123_resistor");
+    assert.equal(sanitizeIdentifier("!!!", "Fallback"), "Fallback");
 });
 
 test("adds an LCSC part into parts with KiCad files and Schrune file", async () => {
@@ -157,4 +163,27 @@ test("downloads STEP model and references it from Schrune and KiCad footprint", 
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
+});
+
+test("parses EasyEDA pads relative to the package origin", () => {
+    assert.deepEqual(parseEasyEdaPads(easyEdaComponent.result.packageDetail.dataStr), [{
+        shape: "rect",
+        x: 2,
+        y: -4,
+        width: 1.5,
+        height: 2,
+        number: "1",
+        rotation: 90,
+    }]);
+});
+
+test("renders KiCad footprint without a model block when no STEP file is provided", () => {
+    const footprint = renderKiCadFootprint("NoModel", {
+        head: {},
+        shape: ["PAD~ELLIPSE~0~0~1~1~~~A"],
+    });
+
+    assert.match(footprint, /\(footprint "NoModel"/);
+    assert.match(footprint, /\(pad "A" smd oval/);
+    assert.doesNotMatch(footprint, /\(model /);
 });
