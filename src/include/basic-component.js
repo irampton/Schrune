@@ -14,7 +14,7 @@ class BasicComponent {
             designatorPrefix: options.designatorPrefix,
         };
         this.info.footprint = params.footprint;
-        this.value = params.value;
+        Object.assign(this, params);
         this.footprint = params.footprint;
         this.pins = [
             { name: "0", pad: 0, net: "" },

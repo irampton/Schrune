@@ -4,7 +4,7 @@ class Inductor extends BasicComponent {
     constructor(params = {}) {
         super(params, {
             partNumber: "Inductor",
-            designatorPrefix: "I",
+            designatorPrefix: "L",
         });
     }
 }

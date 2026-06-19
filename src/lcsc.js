@@ -264,7 +264,7 @@ function parseEasyEdaPads(footprintData) {
         .filter((pad) => pad.number);
 }
 
-function renderKiCadFootprint(partName, footprintData, stepFileName) {
+function renderKiCadFootprint(partName, footprintData, stepFileName, modelProjectDir = `parts/${partName}`) {
     const pads = parseEasyEdaPads(footprintData);
     const padLines = pads.map((pad) => {
         const shape = pad.shape === "ellipse" || pad.shape === "oval" ? "oval" : pad.shape === "circle" ? "circle" : "rect";
@@ -272,7 +272,7 @@ function renderKiCadFootprint(partName, footprintData, stepFileName) {
             `(size ${pad.width.toFixed(4)} ${pad.height.toFixed(4)}) (layers "F.Cu" "F.Paste" "F.Mask"))`;
     });
     const model = stepFileName
-        ? `\n  (model "\${KIPRJMOD}/parts/${partName}/${stepFileName}"\n` +
+        ? `\n  (model "\${KIPRJMOD}/${modelProjectDir.replace(/\\/g, "/")}/${stepFileName}"\n` +
             `    (offset (xyz 0 0 0))\n` +
             `    (scale (xyz 1 1 1))\n` +
             `    (rotate (xyz 0 0 0))\n` +
@@ -355,12 +355,16 @@ async function addLcscPart(partNumber, options = {}) {
         ? component.dataStr.head.c_para
         : {};
     const partName = sanitizeIdentifier(cPara["Manufacturer Part"] || component.title || partNumber, partNumber);
-    const partsDir = path.resolve(options.cwd || process.cwd(), "parts");
+    const partsDir = options.partsDir
+        ? path.resolve(options.partsDir)
+        : path.resolve(options.cwd || process.cwd(), "parts");
     const destinationDir = path.join(partsDir, sanitizeFileName(partName, partNumber));
 
     fs.mkdirSync(destinationDir, { recursive: true });
 
     const model = await tryDownloadModel(component, destinationDir, partName, options);
+    const projectRoot = path.resolve(options.cwd || process.cwd());
+    const modelProjectDir = path.relative(projectRoot, destinationDir).replace(/\\/g, "/");
     const pins = uniquePinEntries(extractPinsFromEasyEdaSymbol(component.dataStr));
     const info = componentInfo(component, {
         symbol: `./${partName}.kicad_sym`,
@@ -373,7 +377,8 @@ async function addLcscPart(partNumber, options = {}) {
     fs.writeFileSync(path.join(destinationDir, `${partName}.kicad_mod`), renderKiCadFootprint(
         partName,
         footprintData,
-        model.downloaded ? model.fileName : undefined
+        model.downloaded ? model.fileName : undefined,
+        modelProjectDir
     ));
     fs.writeFileSync(schrunePath, renderSchrunePart(partName, info, pins));
 

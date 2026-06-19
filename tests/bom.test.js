@@ -1,0 +1,159 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+const { assignDesignators, step1, step3 } = require("../app");
+const { lockPathFor } = require("../src/bom");
+
+function makeFixture(source) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-bom-"));
+    const filePath = path.join(dir, "fixture.schrune");
+    fs.writeFileSync(filePath, source);
+    return { dir, filePath };
+}
+
+function compile(source) {
+    const fixture = makeFixture(source);
+    try {
+        return {
+            fixture,
+            compiled: assignDesignators(step1(fixture.filePath)),
+        };
+    } catch (error) {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+        throw error;
+    }
+}
+
+test("assigns deterministic designators by prefix and stable component signature", () => {
+    const { fixture, compiled } = compile(`module top () {
+    net left;
+    net right;
+    c1 = new Capacitor(value = "100nF", footprint = "0402");
+    r1 = new Resistor(value = "10k", footprint = "0603");
+    r2 = new Resistor(value = "1k", footprint = "0603");
+    left ~> r1 ~> right;
+    left ~> r2 ~> right;
+    left ~> c1 ~> right;
+}
+`);
+
+    try {
+        assert.deepEqual(
+            compiled.components.map((component) => component.designator),
+            ["C1", "R1", "R2"]
+        );
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("primitive components keep selection fields", () => {
+    const { fixture, compiled } = compile(`module top () {
+    r1 = new Resistor(value = "10k", footprint = "0603", power = "0.1W", tolerance = "1%");
+}
+`);
+
+    try {
+        const resistor = compiled.components[0];
+        assert.equal(resistor.value, "10k");
+        assert.equal(resistor.footprint, "0603");
+        assert.equal(resistor.power, "0.1W");
+        assert.equal(resistor.tolerance, "1%");
+        assert.equal(resistor.designator, "R1");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("step3 reuses parts-lock entries and writes BOM csv", async () => {
+    const { fixture, compiled } = compile(`module top () {
+    net left;
+    net right;
+    r1 = new Resistor(value = "10k", footprint = "0603", power = "0.1W");
+    left ~> r1 ~> right;
+}
+`);
+
+    try {
+        const lockPath = lockPathFor(fixture.filePath);
+        fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+        fs.writeFileSync(lockPath, `${JSON.stringify({
+            version: 1,
+            parts: [{
+                lcsc: "C25804",
+                manufacturer: "YAGEO",
+                mpn: "RC0603FR-0710KL",
+                package: "0603",
+                description: "10k 1% resistor",
+                stock: 1000,
+                unitCost: 0.001,
+                isBasic: true,
+                isPreferred: false,
+            }],
+            selectors: {
+                R1: "C25804",
+            },
+        }, null, 2)}\n`);
+
+        let apiCalls = 0;
+        const result = await step3(fixture.filePath, compiled, {
+            downloadParts: false,
+            selectPart: async () => {
+                apiCalls++;
+                throw new Error("selector should not be called for locked parts");
+            },
+        });
+
+        assert.equal(apiCalls, 0);
+        assert.equal(result.components[0].info.LCSC, "C25804");
+        assert.equal(fs.existsSync(result.bomPath), true);
+        const bom = fs.readFileSync(result.bomPath, "utf8");
+        assert.match(bom, /^Designator,Quantity,Manufacturer/m);
+        assert.match(bom, /R1,1,YAGEO,RC0603FR-0710KL,C25804/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("step3 selects unlocked generic parts and updates parts-lock", async () => {
+    const { fixture, compiled } = compile(`module top () {
+    c1 = new Capacitor(value = "100nF", footprint = "0402", voltage = "16V");
+}
+`);
+
+    try {
+        const result = await step3(fixture.filePath, compiled, {
+            downloadParts: false,
+            selectPart: async (_component, filters) => {
+                assert.deepEqual(filters, {
+                    type: "Capacitor",
+                    value: "100nF",
+                    footprint: "0402",
+                    voltage: "16V",
+                    power: undefined,
+                    tolerance: undefined,
+                });
+                return {
+                    lcsc: "C1525",
+                    manufacturer: "Samsung",
+                    mpn: "CL05B104KO5NNNC",
+                    package: "0402",
+                    stock: 5000,
+                    unitCost: 0.002,
+                    isBasic: true,
+                    isPreferred: true,
+                };
+            },
+        });
+
+        assert.equal(result.components[0].designator, "C1");
+        assert.equal(result.components[0].info.LCSC, "C1525");
+        const lock = JSON.parse(fs.readFileSync(lockPathFor(fixture.filePath), "utf8"));
+        assert.equal(lock.parts[0].lcsc, "C1525");
+        assert.deepEqual(lock.selectors, { C1: "C1525" });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});

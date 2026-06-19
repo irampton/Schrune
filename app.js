@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { addLcscPart } = require("./src/lcsc");
+const { assignDesignators, step3 } = require("./src/bom");
 
 function stripComments(source) {
     return source.replace(/\/\/.*$/gm, "");
@@ -303,6 +304,12 @@ function includedFiles(filePath, loaded = new Set()) {
 
 function createPrimitiveTemplates() {
     const names = ["Resistor", "Capacitor", "Diode", "Inductor"];
+    const prefixes = {
+        Resistor: "R",
+        Capacitor: "C",
+        Diode: "D",
+        Inductor: "L",
+    };
     return new Map(names.map((name) => [name, {
         name,
         primitive: true,
@@ -313,7 +320,7 @@ function createPrimitiveTemplates() {
             symbol: "./",
             model: "./",
             LCSC: undefined,
-            designatorPrefix: name[0],
+            designatorPrefix: prefixes[name],
         },
         pins: [
             { name: "0", pad: 0 },
@@ -337,7 +344,7 @@ function createComponent(template, params = {}) {
                 };
                 this.pins = [];
                 if (template.primitive) {
-                    this.value = params.value;
+                    Object.assign(this, params);
                     this.footprint = footprint;
                 }
 
@@ -351,6 +358,15 @@ function createComponent(template, params = {}) {
 
 function createComponentInstances(template, params, count) {
     return Array.from({ length: count }, () => createComponent(template, params));
+}
+
+function annotateComponent(component, name, index) {
+    component.__schrune = {
+        ...(component.__schrune || {}),
+        name,
+        arrayIndex: index,
+    };
+    return component;
 }
 
 function addPins(target, pins) {
@@ -851,7 +867,8 @@ function executeStatement(statement, context, scope = {}) {
             throw new Error(`Duplicate component "${instanceName}"`);
         }
 
-        const instances = createComponentInstances(template, params, count);
+        const instances = createComponentInstances(template, params, count)
+            .map((component, index) => annotateComponent(component, instanceName, index));
         componentsByName.set(instanceName, instances);
         components.push(...instances);
         return;
@@ -870,7 +887,7 @@ function executeStatement(statement, context, scope = {}) {
             throw new Error(`Duplicate component "${instanceName}"`);
         }
 
-        const component = createComponent(template, params);
+        const component = annotateComponent(createComponent(template, params), instanceName);
         componentsByName.set(instanceName, component);
         components.push(component);
         return;
@@ -1699,7 +1716,7 @@ function writeStep1JavaScript(filePath) {
 function usage() {
     return [
         "Usage:",
-        "  node app.js build [--keep-js] <file.schrune>",
+        "  node app.js build [--keep-js] [--no-parts-lock] <file.schrune>",
         "  node app.js add <CXXXX>",
         "",
         "Compatibility:",
@@ -1734,7 +1751,8 @@ async function main() {
     }
 
     const keepJs = args.includes("--keep-js");
-    const inputFile = args.find((arg) => arg !== "--keep-js");
+    const noPartsLock = args.includes("--no-parts-lock");
+    const inputFile = args.find((arg) => arg !== "--keep-js" && arg !== "--no-parts-lock");
     if (!inputFile || path.extname(inputFile) !== ".schrune") {
         throw new Error(usage());
     }
@@ -1748,7 +1766,9 @@ async function main() {
         writeStep1JavaScript(inputPath);
     }
 
-    console.dir(step1(inputPath), { depth: null });
+    const compiled = assignDesignators(step1(inputPath));
+    const result = await step3(inputPath, compiled, { noPartsLock });
+    console.dir(result, { depth: null });
 }
 
 if (require.main === module) {
@@ -1759,7 +1779,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+    assignDesignators,
     step1,
+    step3,
     writeStep1JavaScript,
     main,
 };
