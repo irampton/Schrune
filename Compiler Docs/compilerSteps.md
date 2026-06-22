@@ -18,7 +18,11 @@ files next to the source `.schrune` files.
 component data, writes KiCad symbol and footprint files (`.kicad_sym` and
 `.kicad_mod`), attempts to download the 3D model as a `.step` through EasyEDA's
 model UUID endpoint, and writes a `<PartName>.schrune` file with component
-metadata and pin mappings. If the STEP payload is empty, an EasyEDA error
+metadata and pin mappings. When the Python `easyeda2kicad` package is available
+on `EASYEDA2KICAD_PYTHONPATH` or the active Python environment, the importer uses
+that package to export the symbol and footprint, matching the import/export path
+used by atopile. If it is not available, the compiler falls back to the built-in
+minimal EasyEDA renderer. If the STEP payload is empty, an EasyEDA error
 document, or otherwise not directly available, the part is generated without a
 model file.
 
@@ -271,6 +275,52 @@ The CSV groups equivalent components and includes designators, quantity,
 manufacturer, manufacturer part number, LCSC number, value, footprint, type,
 description, stock, unit cost, and basic/preferred flags.
 
-## Step 4 - Generate KiCad Schmatic
+## Step 4 - Generate KiCad Schematic
 
-Take the module level output and turn that into a KiCad schmatic. This includes grabbing LSCS data, if needed.
+Take the module-level output from Step 3 and turn it into KiCad project files.
+Step 3 is responsible for selecting or downloading generic LCSC/JLC parts before
+this point. Step 4 validates that every final component has both a KiCad symbol
+file (`.kicad_sym`) and footprint file (`.kicad_mod`). If a component's metadata
+does not point directly at an asset, the compiler searches under the source
+file's `parts/` tree using the component type, selected MPN, part number, and
+declared symbol/footprint names. Missing or ambiguous assets are build errors.
+
+The compiler writes all KiCad files into a sibling directory next to the target
+`.schrune` file:
+
+```
+KiCad/{filename}.kicad_pro
+KiCad/{filename}.kicad_sch
+KiCad/{filename}.kicad_pcb
+```
+
+The schematic embeds each imported symbol definition, places each component on a
+grid, then connects every connected pin to a short wire and a net label with the
+compiled net name. Rails use ordinary net labels for now; dedicated KiCad power
+symbols are intentionally not generated until symbol-library compatibility is
+handled more carefully.
+
+Two-pin passives such as resistors and capacitors that share the same pair of
+nets are placed together so decoupling and pull-up groups remain visually close.
+The placement code is intentionally grouped around component sets so a later
+module feature can place components from the same module in the same region.
+
+The PCB file is generated from the same component list. It places each footprint
+on a matching grid, declares all compiled nets, assigns connected pads to those
+nets, and sets the schematic footprint property to the matching `Schrune:*`
+footprint identifier so KiCad can cross-reference the schematic and layout. Step
+4 uses the downloaded `.kicad_mod` footprint geometry as-is instead of trying to
+infer missing drills, silkscreen, or through-hole attributes. The only footprint
+edits made during board generation are board-instance data that KiCad needs:
+placement, UUIDs, reference/value text, and pad net assignments.
+
+The LCSC importer prefers `easyeda2kicad` exports for newly added parts. The
+fallback renderer preserves EasyEDA through-hole drill hints and simple `TRACK`,
+`RECT`, and `CIRCLE` footprint graphics, but it is intentionally less complete
+than the converter. Existing downloaded footprint files are not mechanically
+repaired by Step 4.
+
+Generated schematic and PCB files currently use the KiCad file versions that
+have been verified to open across the local examples. KiCad may still offer to
+update the files on save; that warning is preferable to generating files a
+target KiCad install cannot open.

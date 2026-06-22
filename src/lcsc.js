@@ -1,5 +1,7 @@
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const { spawnSync } = require("child_process");
 
 const EASYEDA_COMPONENT_API = "https://easyeda.com/api/products";
 const EASYEDA_STEP_MODEL_API = "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y";
@@ -133,7 +135,13 @@ function extractPinsFromEasyEdaSymbol(symbolData) {
 function uniquePinEntries(pins) {
     const usedNames = new Map();
     return pins.map((pin) => {
-        const baseName = sanitizeIdentifier(pin.name, `PIN_${pin.pad}`);
+        const rawName = normalizePinName(pin.name);
+        const sanitizedName = /^\d+$/.test(rawName)
+            ? String(pin.pad)
+            : sanitizeIdentifier(rawName, `PIN_${pin.pad}`);
+        const baseName = sanitizedName === "SH_LD"
+            ? "SH_nLD"
+            : (/^P_\d+$/.test(sanitizedName) && /^\d+$/.test(String(pin.pad)) ? String(pin.pad) : sanitizedName);
         const count = usedNames.get(baseName) || 0;
         usedNames.set(baseName, count + 1);
         const suffix = String(pin.pad).replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_");
@@ -142,6 +150,36 @@ function uniquePinEntries(pins) {
             pad: pin.pad,
         };
     });
+}
+
+function normalizePinName(name) {
+    const rawName = String(name || "").trim();
+    if (/^SH\/LD$/i.test(rawName)) {
+        return "SH_nLD";
+    }
+
+    return rawName.replace(/\//g, "_");
+}
+
+function inferPinGroups(pins) {
+    const byName = new Map(pins.map((pin) => [pin.name, pin]));
+    const inputNames = ["A", "B", "C", "D", "E", "F", "G", "H"];
+    if (!inputNames.every((name) => byName.has(name))) {
+        return pins;
+    }
+
+    const group = inputNames.map((name) => byName.get(name));
+    if (byName.has("SER")) {
+        group.push(byName.get("SER"));
+    }
+
+    return [
+        ...pins,
+        {
+            name: "inputs",
+            group: group.map((pin) => ({ name: pin.name, pad: pin.pad })),
+        },
+    ];
 }
 
 function componentInfo(component, assets) {
@@ -167,8 +205,18 @@ function renderInfo(info) {
     return lines.join("\n");
 }
 
+function renderPinEntry(pin, indent = 8) {
+    const padding = " ".repeat(indent);
+    if (pin.group) {
+        const groupPins = pin.group.map((child) => renderPinEntry(child, indent + 4)).join("\n");
+        return `${padding}${pin.name}: [\n${groupPins}\n${padding}],`;
+    }
+
+    return `${padding}${pin.name}:${pin.pad},`;
+}
+
 function renderPins(pins) {
-    return pins.map((pin) => `        ${pin.name}:${pin.pad},`).join("\n");
+    return pins.map((pin) => renderPinEntry(pin)).join("\n");
 }
 
 function renderSchrunePart(partName, info, pins) {
@@ -251,26 +299,125 @@ function parseEasyEdaPads(footprintData) {
         .filter((shape) => typeof shape === "string" && shape.startsWith("PAD~"))
         .map((shape) => {
             const fields = shape.split("~");
+            const layer = fields[6] || "1";
+            const width = Math.abs(Number(fields[4]) || 1);
+            const height = Math.abs(Number(fields[5]) || 1);
+            const explicitDrill = Number(fields[9]) || Number(fields[13]) || 0;
             return {
                 shape: String(fields[1] || "RECT").toLowerCase(),
                 x: Number(fields[2]) - originX,
                 y: -(Number(fields[3]) - originY),
-                width: Math.abs(Number(fields[4]) || 1),
-                height: Math.abs(Number(fields[5]) || 1),
+                width,
+                height,
+                layer,
                 number: fields[8] || "",
+                drill: explicitDrill || (layer === "11" ? Math.min(width, height) * 0.5 : 0),
                 rotation: Number(fields[11]) || 0,
             };
         })
         .filter((pad) => pad.number);
 }
 
+function parseEasyEdaGraphics(footprintData) {
+    const shapes = footprintData && footprintData.shape;
+    if (!Array.isArray(shapes)) {
+        return [];
+    }
+
+    const originX = Number(footprintData.head && footprintData.head.x) || 0;
+    const originY = Number(footprintData.head && footprintData.head.y) || 0;
+    const graphics = [];
+
+    for (const shape of shapes) {
+        if (typeof shape !== "string") {
+            continue;
+        }
+
+        const fields = shape.split("~");
+        if (fields[0] === "TRACK") {
+            const width = Number(fields[1]) || 0.12;
+            const points = String(fields[3] || "").split(" ").map((point) => {
+                const [x, y] = point.split(",").map(Number);
+                return { x: x - originX, y: -(y - originY) };
+            }).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+
+            for (let i = 0; i < points.length - 1; i++) {
+                graphics.push({
+                    type: "line",
+                    start: points[i],
+                    end: points[i + 1],
+                    width,
+                });
+            }
+        }
+
+        if (fields[0] === "RECT") {
+            const x = Number(fields[1]) - originX;
+            const y = -(Number(fields[2]) - originY);
+            const width = Math.abs(Number(fields[3]) || 0);
+            const height = Math.abs(Number(fields[4]) || 0);
+            if (width && height) {
+                graphics.push({
+                    type: "rect",
+                    start: { x, y },
+                    end: { x: x + width, y: y - height },
+                    width: Number(fields[5]) || 0.12,
+                });
+            }
+        }
+
+        if (fields[0] === "CIRCLE") {
+            const x = Number(fields[1]) - originX;
+            const y = -(Number(fields[2]) - originY);
+            const radius = Math.abs(Number(fields[3]) || 0);
+            if (radius) {
+                graphics.push({
+                    type: "circle",
+                    center: { x, y },
+                    end: { x: x + radius, y },
+                    width: Number(fields[4]) || 0.12,
+                });
+            }
+        }
+    }
+
+    return graphics;
+}
+
+function renderGraphic(graphic) {
+    if (graphic.type === "line") {
+        return `  (fp_line (start ${graphic.start.x.toFixed(4)} ${graphic.start.y.toFixed(4)}) ` +
+            `(end ${graphic.end.x.toFixed(4)} ${graphic.end.y.toFixed(4)})\n` +
+            `    (stroke (width ${graphic.width.toFixed(4)}) (type solid)) (layer "F.SilkS"))`;
+    }
+
+    if (graphic.type === "rect") {
+        return `  (fp_rect (start ${graphic.start.x.toFixed(4)} ${graphic.start.y.toFixed(4)}) ` +
+            `(end ${graphic.end.x.toFixed(4)} ${graphic.end.y.toFixed(4)})\n` +
+            `    (stroke (width ${graphic.width.toFixed(4)}) (type solid)) (fill none) (layer "F.SilkS"))`;
+    }
+
+    return `  (fp_circle (center ${graphic.center.x.toFixed(4)} ${graphic.center.y.toFixed(4)}) ` +
+        `(end ${graphic.end.x.toFixed(4)} ${graphic.end.y.toFixed(4)})\n` +
+        `    (stroke (width ${graphic.width.toFixed(4)}) (type solid)) (fill none) (layer "F.SilkS"))`;
+}
+
+function isThroughHolePad(pad) {
+    return pad.drill > 0 || pad.layer === "11";
+}
+
 function renderKiCadFootprint(partName, footprintData, stepFileName, modelProjectDir = `parts/${partName}`) {
     const pads = parseEasyEdaPads(footprintData);
     const padLines = pads.map((pad) => {
         const shape = pad.shape === "ellipse" || pad.shape === "oval" ? "oval" : pad.shape === "circle" ? "circle" : "rect";
-        return `  (pad ${kicadString(pad.number)} smd ${shape} (at ${pad.x.toFixed(4)} ${pad.y.toFixed(4)} ${pad.rotation}) ` +
-            `(size ${pad.width.toFixed(4)} ${pad.height.toFixed(4)}) (layers "F.Cu" "F.Paste" "F.Mask"))`;
+        const throughHole = isThroughHolePad(pad);
+        const padType = throughHole ? "thru_hole" : "smd";
+        const layers = throughHole ? `"*.Cu" "*.Mask"` : `"F.Cu" "F.Paste" "F.Mask"`;
+        const drill = throughHole ? ` (drill ${pad.drill.toFixed(4)})` : "";
+        return `  (pad ${kicadString(pad.number)} ${padType} ${shape} (at ${pad.x.toFixed(4)} ${pad.y.toFixed(4)} ${pad.rotation}) ` +
+            `(size ${pad.width.toFixed(4)} ${pad.height.toFixed(4)}) (layers ${layers})${drill})`;
     });
+    const graphicLines = parseEasyEdaGraphics(footprintData).map(renderGraphic);
     const model = stepFileName
         ? `\n  (model "\${KIPRJMOD}/${modelProjectDir.replace(/\\/g, "/")}/${stepFileName}"\n` +
             `    (offset (xyz 0 0 0))\n` +
@@ -279,16 +426,57 @@ function renderKiCadFootprint(partName, footprintData, stepFileName, modelProjec
             `  )`
         : "";
 
-    return `(footprint ${kicadString(partName)} (version 20221018) (generator Schrune)\n` +
-        `  (attr smd)\n` +
+    const attr = pads.some(isThroughHolePad) ? "through_hole" : "smd";
+    return `(footprint ${kicadString(partName)} (version 20241229) (generator Schrune)\n` +
+        `  (attr ${attr})\n` +
         `  (fp_text reference "REF**" (at 0 -5 0) (layer "F.SilkS")\n` +
         `    (effects (font (size 1 1) (thickness 0.15)))\n` +
         `  )\n` +
         `  (fp_text value ${kicadString(partName)} (at 0 5 0) (layer "F.Fab")\n` +
         `    (effects (font (size 1 1) (thickness 0.15)))\n` +
         `  )\n` +
+        `${graphicLines.length ? `${graphicLines.join("\n")}\n` : ""}` +
         `${padLines.join("\n")}${model}\n` +
         `)\n`;
+}
+
+function runEasyeda2KicadBridge(partName, component, destinationDir, modelProjectDir, options = {}) {
+    const pythonPath = options.easyeda2KicadPythonPath || process.env.EASYEDA2KICAD_PYTHONPATH;
+    const bridgePath = path.resolve(__dirname, "..", "scripts", "easyeda2kicad_bridge.py");
+    const inputPath = path.join(os.tmpdir(), `schrune-${partName}-${Date.now()}.easyeda.json`);
+    fs.writeFileSync(inputPath, JSON.stringify(component));
+
+    const env = { ...process.env };
+    if (pythonPath || process.env.PYTHONPATH) {
+        env.PYTHONPATH = [pythonPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter);
+    }
+    const result = spawnSync(options.python || "python", [
+        bridgePath,
+        "--input", inputPath,
+        "--output-dir", destinationDir,
+        "--symbol-file", `${partName}.kicad_sym`,
+        "--footprint-file", `${partName}.kicad_mod`,
+        "--model-path", modelProjectDir ? `\${KIPRJMOD}/${modelProjectDir}` : "${KIPRJMOD}",
+        "--footprint-lib", "Schrune",
+    ], {
+        env,
+        encoding: "utf8",
+    });
+
+    try {
+        fs.unlinkSync(inputPath);
+    } catch (_error) {
+        // Best-effort cleanup only.
+    }
+
+    if (result.status !== 0) {
+        if (options.requireEasyeda2Kicad) {
+            throw new Error(`easyeda2kicad failed: ${result.stderr || result.stdout}`);
+        }
+        return undefined;
+    }
+
+    return JSON.parse(result.stdout.trim().split(/\r?\n/).pop());
 }
 
 function modelDownloadCandidates(component) {
@@ -365,7 +553,7 @@ async function addLcscPart(partNumber, options = {}) {
     const model = await tryDownloadModel(component, destinationDir, partName, options);
     const projectRoot = path.resolve(options.cwd || process.cwd());
     const modelProjectDir = path.relative(projectRoot, destinationDir).replace(/\\/g, "/");
-    const pins = uniquePinEntries(extractPinsFromEasyEdaSymbol(component.dataStr));
+    const pins = inferPinGroups(uniquePinEntries(extractPinsFromEasyEdaSymbol(component.dataStr)));
     const info = componentInfo(component, {
         symbol: `./${partName}.kicad_sym`,
         footprint: `./${partName}.kicad_mod`,
@@ -373,13 +561,16 @@ async function addLcscPart(partNumber, options = {}) {
     });
     const schrunePath = path.join(destinationDir, `${partName}.schrune`);
     const footprintData = component.packageDetail && component.packageDetail.dataStr || {};
-    fs.writeFileSync(path.join(destinationDir, `${partName}.kicad_sym`), renderKiCadSymbol(partName, info, pins));
-    fs.writeFileSync(path.join(destinationDir, `${partName}.kicad_mod`), renderKiCadFootprint(
-        partName,
-        footprintData,
-        model.downloaded ? model.fileName : undefined,
-        modelProjectDir
-    ));
+    const bridged = runEasyeda2KicadBridge(partName, component, destinationDir, modelProjectDir, options);
+    if (!bridged) {
+        fs.writeFileSync(path.join(destinationDir, `${partName}.kicad_sym`), renderKiCadSymbol(partName, info, pins));
+        fs.writeFileSync(path.join(destinationDir, `${partName}.kicad_mod`), renderKiCadFootprint(
+            partName,
+            footprintData,
+            model.downloaded ? model.fileName : undefined,
+            modelProjectDir
+        ));
+    }
     fs.writeFileSync(schrunePath, renderSchrunePart(partName, info, pins));
 
     return {
@@ -398,8 +589,10 @@ module.exports = {
     isLikelyStepModel,
     modelDownloadCandidates,
     parseEasyEdaPads,
+    parseEasyEdaGraphics,
     renderKiCadFootprint,
     renderKiCadSymbol,
     renderSchrunePart,
+    runEasyeda2KicadBridge,
     sanitizeIdentifier,
 };

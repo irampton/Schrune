@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { addLcscPart } = require("./src/lcsc");
 const { assignDesignators, step3 } = require("./src/bom");
+const { writeKiCadFiles } = require("./src/kicad");
 
 function stripComments(source) {
     return source.replace(/\/\/.*$/gm, "");
@@ -369,11 +370,11 @@ function annotateComponent(component, name, index) {
     return component;
 }
 
-function addPins(target, pins) {
+function addPins(target, pins, indexed = false) {
     for (const pin of pins) {
         if (pin.group) {
             const group = [];
-            addPins(group, pin.group);
+            addPins(group, pin.group, true);
             target[pin.name] = group;
             continue;
         }
@@ -383,6 +384,10 @@ function addPins(target, pins) {
             pad: pin.pad,
             net: "",
         };
+
+        if (indexed) {
+            target.push(pinValue);
+        }
 
         if (/^\d+$/.test(pin.name)) {
             target[Number(pin.name)] = pinValue;
@@ -1217,22 +1222,31 @@ function pinProperty(name) {
     return /^\d+$/.test(String(name)) ? `[${name}]` : `.${name}`;
 }
 
-function renderPinTemplateAssignments(pins, target, indent = "        ") {
+function renderPinTemplateAssignments(pins, target, indent = "        ", indexed = false) {
     const lines = [];
     for (const pin of pins) {
         if (pin.group) {
             const property = pinProperty(pin.name);
             lines.push(`${indent}${target}${property} = [];`);
-            lines.push(...renderPinTemplateAssignments(pin.group, `${target}${property}`, indent));
+            lines.push(...renderPinTemplateAssignments(pin.group, `${target}${property}`, indent, true));
             continue;
         }
 
         const property = pinProperty(pin.name);
-        lines.push(`${indent}${target}${property} = ${renderObjectLiteral({
+        const pinValue = renderObjectLiteral({
             name: pin.name,
             pad: pin.pad,
             net: "",
-        }, indent.length)};`);
+        }, indent.length);
+
+        if (indexed) {
+            lines.push(`${indent}${target}.push(${pinValue});`);
+            if (!/^\d+$/.test(pin.name)) {
+                lines.push(`${indent}${target}${property} = ${target}[${target}.length - 1];`);
+            }
+        } else {
+            lines.push(`${indent}${target}${property} = ${pinValue};`);
+        }
     }
     return lines;
 }
@@ -1767,7 +1781,7 @@ async function main() {
     }
 
     const compiled = assignDesignators(step1(inputPath));
-    const result = await step3(inputPath, compiled, { noPartsLock });
+    const result = writeKiCadFiles(inputPath, await step3(inputPath, compiled, { noPartsLock }));
     console.dir(result, { depth: null });
 }
 
@@ -1782,6 +1796,7 @@ module.exports = {
     assignDesignators,
     step1,
     step3,
+    writeKiCadFiles,
     writeStep1JavaScript,
     main,
 };

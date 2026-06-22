@@ -63,6 +63,43 @@ module top () {
     });
 });
 
+test("connects indexed pins inside named pin groups", () => {
+    const groupedPart = `part GroupedPart {
+    info: {
+        partNumber: "GP-1",
+        manufacture: "TestCo",
+        footprint: "./",
+        symbol: "./",
+        designatorPrefix: "U"
+    }
+
+    pins: [
+        inputs: [
+            A:1,
+            B:2,
+        ],
+    ]
+}
+`;
+
+    const fixture = makeFixture(`#include "GroupedPart.schrune"
+
+module top () {
+    net signal;
+    part u1 = new GroupedPart();
+    u1.inputs[0] ~ signal;
+}
+`, { "GroupedPart.schrune": groupedPart });
+
+    try {
+        const result = step1(fixture.filePath);
+        assert.equal(result.components[0].pins.inputs[0].net, "signal");
+        assert.equal(result.components[0].pins.inputs.A.net, "signal");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("rejects #import", () => {
     withFixture(`#import "TestPart.schrune"
 
