@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { step1 } = require("../../app");
+const { step1 } = require("../../src/app");
 
 const basicPart = `part TestPart {
     info: {

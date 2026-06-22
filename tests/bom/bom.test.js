@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { assignDesignators, step1, step3 } = require("../../app");
+const { assignDesignators, step1, step3 } = require("../../src/app");
 const { bomCsv, lockPathFor, makeBomRows, readPartsLock } = require("../../src/bom");
 
 function makeFixture(source) {

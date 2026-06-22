@@ -4,11 +4,12 @@ This file descibes the steps of the Schrune Compiler. The goal is to translate a
 
 ## CLI Commands
 
-The compiler entry point is `app.js`.
+The compiler entry point is `src/app.js`, exposed as the `shrune` command when
+the package is installed.
 
 ```
-node app.js build [--keep-js] path/to/file.schrune
-node app.js add C2040
+shrune build [--keep-js] path/to/file.schrune
+shrune add C2040
 ```
 
 `build` runs the current compiler flow. `--keep-js` keeps the Step 1 JavaScript

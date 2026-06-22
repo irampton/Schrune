@@ -1,4 +1,11 @@
 {
+  "name": "shrune",
+  "version": "0.1.0",
+  "description": "Schrune compiler and KiCad generator",
+  "main": "src/app.js",
+  "bin": {
+    "shrune": "src/app.js"
+  },
   "scripts": {
     "test": "node --test"
   }

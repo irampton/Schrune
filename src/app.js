@@ -1,8 +1,10 @@
+#!/usr/bin/env node
+
 const fs = require("fs");
 const path = require("path");
-const { addLcscPart } = require("./src/lcsc");
-const { assignDesignators, step3 } = require("./src/bom");
-const { writeKiCadFiles } = require("./src/kicad");
+const { addLcscPart } = require("./lcsc");
+const { assignDesignators, step3 } = require("./bom");
+const { writeKiCadFiles } = require("./kicad");
 
 function stripComments(source) {
     return source.replace(/\/\/.*$/gm, "");
@@ -1664,7 +1666,7 @@ function renderTopJavaScript(filePath) {
         .map((match) => match[1])
         .filter((name) => createPrimitiveTemplates().has(name) && !includeNames.has(name));
     const primitiveRequireLines = [...new Set(primitiveNames)].map((name) => {
-        const includePath = path.join(__dirname, "src", "include", primitiveIncludeFileName(name));
+        const includePath = path.join(__dirname, "include", primitiveIncludeFileName(name));
         const relativePath = `./${path.relative(inputDir, includePath).replace(/\\/g, "/").replace(/\.js$/, "")}`;
         return `const ${name} = require(${jsString(relativePath)});`;
     });
@@ -1730,11 +1732,11 @@ function writeStep1JavaScript(filePath) {
 function usage() {
     return [
         "Usage:",
-        "  node app.js build [--keep-js] [--no-parts-lock] <file.schrune>",
-        "  node app.js add <CXXXX>",
+        "  shrune build [--keep-js] [--no-parts-lock] <file.schrune>",
+        "  shrune add <CXXXX>",
         "",
         "Compatibility:",
-        "  node app.js [--keep-js] <file.schrune>",
+        "  shrune [--keep-js] <file.schrune>",
     ].join("\n");
 }
 

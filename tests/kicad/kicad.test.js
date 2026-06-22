@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { assignDesignators, step1, writeKiCadFiles } = require("../../app");
+const { assignDesignators, step1, writeKiCadFiles } = require("../../src/app");
 
 const partFile = `part TestPart {
     info: {
