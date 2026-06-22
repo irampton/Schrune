@@ -101,13 +101,13 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.equal(fs.existsSync(result.pcbPath), true);
 
         const schematic = fs.readFileSync(result.schematicPath, "utf8");
-        assert.match(schematic, /\(kicad_sch \(version 20230121\)/);
+        assert.match(schematic, /\(kicad_sch \(version 20260306\) \(generator "Schrune"\) \(generator_version "10\.0"\)/);
         assert.match(schematic, /\(symbol "TestPart"/);
         assert.match(schematic, /\(property "Reference" "U1" \(at /);
         assert.match(schematic, /\(property "Value" "TestPart" \(at /);
-        assert.match(schematic, /\(property "Footprint" "Schrune:TestPart" \(at /);
-        assert.match(schematic, /\(property "Reference" "U\?"[\s\S]*?\(effects[\s\S]*?\(hide yes\)/);
-        assert.match(schematic, /\(property "Value" "TestPart"[\s\S]*?\(effects[\s\S]*?\(hide yes\)/);
+        assert.match(schematic, /\(property "Footprint" "Schrune:TestPart" \(at [^)]*\) \(hide yes\)/);
+        assert.match(schematic, /\(property "Reference" "U\?"[\s\S]*?\(hide yes\)[\s\S]*?\(effects/);
+        assert.match(schematic, /\(property "Value" "TestPart"[\s\S]*?\(hide yes\)[\s\S]*?\(effects/);
         const referenceProperty = schematic.match(/    \(property "Reference" "U1"[\s\S]*?\n    \)/)[0];
         assert.doesNotMatch(referenceProperty, /\(id /);
         assert.doesNotMatch(referenceProperty, /\(uuid /);
@@ -120,7 +120,7 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.doesNotMatch(schematic, /power:/);
 
         const pcb = fs.readFileSync(result.pcbPath, "utf8");
-        assert.match(pcb, /\(kicad_pcb \(version 20221018\)/);
+        assert.match(pcb, /\(kicad_pcb \(version 20260206\) \(generator "Schrune"\) \(generator_version "10\.0"\)/);
         assert.match(pcb, /\(net 1 "GND"\)|\(net 2 "GND"\)/);
         assert.match(pcb, /\(footprint "Schrune:TestPart"/);
         assert.match(pcb, /\(fp_text reference "U1"/);

@@ -114,11 +114,13 @@ test("adds an LCSC part into parts with KiCad files and Schrune file", async () 
         assert.match(schrune, /GND_3:3/);
 
         const symbol = fs.readFileSync(path.join(partDir, "ACME_123.kicad_sym"), "utf8");
-        assert.match(symbol, /\(kicad_symbol_lib/);
+        assert.match(symbol, /\(kicad_symbol_lib \(version 20251024\) \(generator "Schrune"\) \(generator_version "10\.0"\)/);
         assert.match(symbol, /\(pin passive line/);
+        assert.match(symbol, /\(property "Footprint" "\.\/ACME_123\.kicad_mod" \(at [^)]*\) \(hide yes\)/);
+        assert.doesNotMatch(symbol, /\(effects[^\n]*hide/);
 
         const footprint = fs.readFileSync(path.join(partDir, "ACME_123.kicad_mod"), "utf8");
-        assert.match(footprint, /\(footprint "ACME_123"/);
+        assert.match(footprint, /\(footprint "ACME_123" \(version 20260206\) \(generator "Schrune"\) \(generator_version "10\.0"\)/);
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }

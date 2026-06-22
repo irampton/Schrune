@@ -7,8 +7,9 @@ const GRID_Y = 38.1;
 const START_X = 35.56;
 const START_Y = 35.56;
 const PIN_LABEL_LENGTH = 5.08;
-const KICAD_SCH_VERSION = 20230121;
-const KICAD_PCB_VERSION = 20221018;
+const KICAD_GENERATOR_VERSION = "10.0";
+const KICAD_SCH_VERSION = 20260306;
+const KICAD_PCB_VERSION = 20260206;
 
 function componentKind(component) {
     return component.constructor && component.constructor.name || "Component";
@@ -262,7 +263,7 @@ function propertyKey(propertySource) {
     return match && match[1];
 }
 
-function normalizePropertyEffectsHide(propertySource) {
+function normalizePropertyHide(propertySource) {
     const effectsIndex = propertySource.indexOf("(effects");
     if (effectsIndex === -1) {
         return propertySource;
@@ -270,25 +271,35 @@ function normalizePropertyEffectsHide(propertySource) {
 
     const effectsEnd = findMatching(propertySource, effectsIndex);
     const effectsSource = propertySource.slice(effectsIndex, effectsEnd + 1);
-    const normalizedEffectsSource = effectsSource.replace(/\shide(?=\s|\))/g, " (hide yes)");
+    const hidden = /\(hide\s+yes\)|\shide(?:\s|\))/.test(effectsSource)
+        || /\(hide\s+yes\)/.test(propertySource);
+    const normalizedEffectsSource = effectsSource
+        .replace(/\s+\(hide\s+yes\)/g, "")
+        .replace(/\shide(?=\s|\))/g, "");
+    const withoutEffectsHide = propertySource.slice(0, effectsIndex)
+        + normalizedEffectsSource
+        + propertySource.slice(effectsEnd + 1);
 
-    return propertySource.slice(0, effectsIndex) + normalizedEffectsSource + propertySource.slice(effectsEnd + 1);
+    if (!hidden || /\(hide\s+yes\)/.test(withoutEffectsHide)) {
+        return withoutEffectsHide;
+    }
+
+    const nextEffectsIndex = withoutEffectsHide.indexOf("(effects");
+    return `${withoutEffectsHide.slice(0, nextEffectsIndex)}(hide yes) ${withoutEffectsHide.slice(nextEffectsIndex)}`;
 }
 
 function hidePropertyEffects(propertySource) {
-    const normalizedPropertySource = normalizePropertyEffectsHide(propertySource);
+    const normalizedPropertySource = normalizePropertyHide(propertySource);
     const effectsIndex = normalizedPropertySource.indexOf("(effects");
     if (effectsIndex === -1) {
         return normalizedPropertySource;
     }
 
-    const effectsEnd = findMatching(normalizedPropertySource, effectsIndex);
-    const effectsSource = normalizedPropertySource.slice(effectsIndex, effectsEnd + 1);
-    if (/\(hide\s+yes\)|\shide(?:\s|\))/.test(effectsSource)) {
+    if (/\(hide\s+yes\)/.test(normalizedPropertySource)) {
         return normalizedPropertySource;
     }
 
-    return `${normalizedPropertySource.slice(0, effectsEnd)} (hide yes)${normalizedPropertySource.slice(effectsEnd)}`;
+    return `${normalizedPropertySource.slice(0, effectsIndex)}(hide yes) ${normalizedPropertySource.slice(effectsIndex)}`;
 }
 
 function hideLibrarySymbolDisplayProperties(source) {
@@ -304,7 +315,7 @@ function hideLibrarySymbolDisplayProperties(source) {
         const key = propertyKey(propertySource);
         const nextPropertySource = key === "Reference" || key === "Value"
             ? hidePropertyEffects(propertySource)
-            : normalizePropertyEffectsHide(propertySource);
+            : normalizePropertyHide(propertySource);
 
         output += source.slice(cursor, openIndex);
         output += nextPropertySource;
@@ -349,8 +360,8 @@ function labelPoint(start, end) {
 function renderSchematicProperty(_projectName, _component, name, value, x, y, options = {}) {
     const hidden = options.hide ? " (hide yes)" : "";
     return [
-        `    (property ${kicadString(name)} ${kicadString(value)} (at ${x.toFixed(2)} ${y.toFixed(2)} 0)`,
-        `      (effects (font (size 1.27 1.27))${hidden})`,
+        `    (property ${kicadString(name)} ${kicadString(value)} (at ${x.toFixed(2)} ${y.toFixed(2)} 0)${hidden}`,
+        `      (effects (font (size 1.27 1.27)))`,
         `    )`,
     ].join("\n");
 }
@@ -427,7 +438,7 @@ function renderSchematic(filePath, compiled, assets, placements) {
     }
 
     return [
-        `(kicad_sch (version ${KICAD_SCH_VERSION}) (generator "Schrune")`,
+        `(kicad_sch (version ${KICAD_SCH_VERSION}) (generator "Schrune") (generator_version "${KICAD_GENERATOR_VERSION}")`,
         `  (uuid ${kicadId(`${projectName}:sheet`)})`,
         `  (paper "A4")`,
         renderLibSymbols(symbols),
@@ -554,7 +565,7 @@ function renderPcb(filePath, compiled, assets, placements) {
     });
 
     return [
-        `(kicad_pcb (version ${KICAD_PCB_VERSION}) (generator "Schrune")`,
+        `(kicad_pcb (version ${KICAD_PCB_VERSION}) (generator "Schrune") (generator_version "${KICAD_GENERATOR_VERSION}")`,
         `  (general`,
         `    (thickness 1.6)`,
         `  )`,

@@ -5,6 +5,9 @@ const { spawnSync } = require("child_process");
 
 const EASYEDA_COMPONENT_API = "https://easyeda.com/api/products";
 const EASYEDA_STEP_MODEL_API = "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y";
+const KICAD_GENERATOR_VERSION = "10.0";
+const KICAD_SYMBOL_LIB_VERSION = 20251024;
+const KICAD_FOOTPRINT_VERSION = 20260206;
 
 function assertLcscPartNumber(partNumber) {
     if (!/^C\d+$/i.test(partNumber)) {
@@ -262,7 +265,7 @@ function renderKiCadSymbol(partName, info, pins) {
         ...rightPins.map((pin) => renderPin(pin, rightPins, "right")),
     ];
 
-    return `(kicad_symbol_lib (version 20211014) (generator Schrune)\n` +
+    return `(kicad_symbol_lib (version ${KICAD_SYMBOL_LIB_VERSION}) (generator "Schrune") (generator_version "${KICAD_GENERATOR_VERSION}")\n` +
         `  (symbol ${kicadString(partName)} (pin_names (offset 1.016)) (in_bom yes) (on_board yes)\n` +
         `    (property "Reference" ${kicadString(`${prefix}?`)} (at 0 ${(top + 2.54).toFixed(2)} 0)\n` +
         `      (effects (font (size 1.27 1.27)))\n` +
@@ -270,11 +273,11 @@ function renderKiCadSymbol(partName, info, pins) {
         `    (property "Value" ${kicadString(partName)} (at 0 ${(-top - 2.54).toFixed(2)} 0)\n` +
         `      (effects (font (size 1.27 1.27)))\n` +
         `    )\n` +
-        `    (property "Footprint" ${kicadString(info.footprint || "")} (at 0 ${(-top - 5.08).toFixed(2)} 0)\n` +
-        `      (effects (font (size 1.27 1.27)) hide)\n` +
+        `    (property "Footprint" ${kicadString(info.footprint || "")} (at 0 ${(-top - 5.08).toFixed(2)} 0) (hide yes)\n` +
+        `      (effects (font (size 1.27 1.27)))\n` +
         `    )\n` +
-        `    (property "Datasheet" "" (at 0 0 0)\n` +
-        `      (effects (font (size 1.27 1.27)) hide)\n` +
+        `    (property "Datasheet" "" (at 0 0 0) (hide yes)\n` +
+        `      (effects (font (size 1.27 1.27)))\n` +
         `    )\n` +
         `    (symbol ${kicadString(`${partName}_0_1`)}\n` +
         `      (rectangle (start ${leftX.toFixed(2)} ${top.toFixed(2)}) (end ${rightX.toFixed(2)} ${(-top).toFixed(2)})\n` +
@@ -427,7 +430,7 @@ function renderKiCadFootprint(partName, footprintData, stepFileName, modelProjec
         : "";
 
     const attr = pads.some(isThroughHolePad) ? "through_hole" : "smd";
-    return `(footprint ${kicadString(partName)} (version 20241229) (generator Schrune)\n` +
+    return `(footprint ${kicadString(partName)} (version ${KICAD_FOOTPRINT_VERSION}) (generator "Schrune") (generator_version "${KICAD_GENERATOR_VERSION}")\n` +
         `  (attr ${attr})\n` +
         `  (fp_text reference "REF**" (at 0 -5 0) (layer "F.SilkS")\n` +
         `    (effects (font (size 1 1) (thickness 0.15)))\n` +
