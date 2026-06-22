@@ -6,6 +6,72 @@ const { addLcscPart } = require("./lcsc");
 const { assignDesignators, step3 } = require("./bom");
 const { writeKiCadFiles } = require("./kicad");
 
+function createProgress(stream = process.stderr) {
+    const frames = ["-", "\\", "|", "/"];
+    const enabled = Boolean(stream.isTTY);
+    let timer;
+    let index = 0;
+    let message = "";
+
+    function render(prefix) {
+        if (!enabled) {
+            return;
+        }
+        stream.write(`\r${prefix} ${message}`);
+    }
+
+    function clear() {
+        if (!enabled) {
+            return;
+        }
+        stream.write(`\r${" ".repeat(message.length + 4)}\r`);
+    }
+
+    function stopTimer() {
+        if (timer) {
+            clearInterval(timer);
+            timer = undefined;
+        }
+    }
+
+    return {
+        start(nextMessage) {
+            stopTimer();
+            message = nextMessage;
+            if (!enabled) {
+                stream.write(`${message}...\n`);
+                return;
+            }
+            index = 0;
+            render(frames[index]);
+            timer = setInterval(() => {
+                index = (index + 1) % frames.length;
+                render(frames[index]);
+            }, 80);
+        },
+        succeed(nextMessage = message) {
+            stopTimer();
+            if (!enabled) {
+                return;
+            }
+            clear();
+            stream.write(`[done] ${nextMessage}\n`);
+        },
+        fail(nextMessage = message) {
+            stopTimer();
+            if (!enabled) {
+                return;
+            }
+            clear();
+            stream.write(`[failed] ${nextMessage}\n`);
+        },
+        stop() {
+            stopTimer();
+            clear();
+        },
+    };
+}
+
 function stripComments(source) {
     return source.replace(/\/\/.*$/gm, "");
 }
@@ -1704,7 +1770,8 @@ function renderTopJavaScript(filePath) {
         "module.exports = top;",
         "",
         "if (require.main === module) {",
-        "    console.dir(top(), { depth: null });",
+        "    top();",
+        "    console.log(\"Step 1 successful.\");",
         "}",
         "",
     ].filter((line) => line !== undefined).join("\n");
@@ -1740,6 +1807,13 @@ function usage() {
     ].join("\n");
 }
 
+class UsageError extends Error {
+    constructor() {
+        super(usage());
+        this.name = "UsageError";
+    }
+}
+
 async function main() {
     const args = process.argv.slice(2);
     const command = args[0] && !args[0].startsWith("--") && path.extname(args[0]) !== ".schrune"
@@ -1749,12 +1823,11 @@ async function main() {
     if (command === "add") {
         const partNumber = args[0];
         if (!partNumber) {
-            throw new Error(usage());
+            throw new UsageError();
         }
 
         const result = await addLcscPart(partNumber);
         console.log(`Added ${result.partName}`);
-        console.log(`Part file: ${result.schrunePath}`);
         console.log(`Pins: ${result.pins.length}`);
         if (!result.modelDownloaded) {
             console.log("3D STEP model payload was not directly downloadable.");
@@ -1763,14 +1836,14 @@ async function main() {
     }
 
     if (command !== "build") {
-        throw new Error(usage());
+        throw new UsageError();
     }
 
     const keepJs = args.includes("--keep-js");
     const noPartsLock = args.includes("--no-parts-lock");
     const inputFile = args.find((arg) => arg !== "--keep-js" && arg !== "--no-parts-lock");
     if (!inputFile || path.extname(inputFile) !== ".schrune") {
-        throw new Error(usage());
+        throw new UsageError();
     }
 
     const inputPath = path.resolve(process.cwd(), inputFile);
@@ -1778,18 +1851,50 @@ async function main() {
         throw new Error(`File not found: ${inputFile}`);
     }
 
-    if (keepJs) {
-        writeStep1JavaScript(inputPath);
-    }
+    const progress = createProgress();
 
-    const compiled = assignDesignators(step1(inputPath));
-    const result = writeKiCadFiles(inputPath, await step3(inputPath, compiled, { noPartsLock }));
-    console.dir(result, { depth: null });
+    try {
+        if (keepJs) {
+            progress.start("Writing intermediate JavaScript");
+            writeStep1JavaScript(inputPath);
+            progress.succeed("Wrote intermediate JavaScript");
+        }
+
+        progress.start("Parsing source");
+        const parsed = step1(inputPath);
+        progress.succeed("Parsed source");
+
+        progress.start("Compiling nets");
+        const compiled = assignDesignators(parsed);
+        progress.succeed("Compiled nets");
+
+        progress.start("Fetching components");
+        const bom = await step3(inputPath, compiled, { noPartsLock });
+        progress.succeed("Fetched components");
+
+        progress.start("Sending to KiCad");
+        const result = writeKiCadFiles(inputPath, bom);
+        progress.succeed("Sent to KiCad");
+
+        console.log(`Build successful: ${result.components.length} components, ${result.netList.size} nets.`);
+    } catch (error) {
+        progress.fail("Build failed");
+        throw error;
+    }
 }
 
 if (require.main === module) {
     main().catch((error) => {
-        console.error(error.message);
+        if (error instanceof UsageError) {
+            console.error(error.message);
+            process.exitCode = 1;
+            return;
+        }
+
+        console.error(`Error: ${error.message}`);
+        if (process.env.DEBUG && error.stack) {
+            console.error(error.stack);
+        }
         process.exitCode = 1;
     });
 }
@@ -1800,5 +1905,7 @@ module.exports = {
     step3,
     writeKiCadFiles,
     writeStep1JavaScript,
+    createProgress,
+    UsageError,
     main,
 };
