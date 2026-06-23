@@ -12,6 +12,7 @@
 * Defualt order for basic parts () delcaration
 * Test point class
 * Figure out better imports, so 1 script can install missing depencancies
+    * Shared modules (or even parts!) across files
 
 ## Medium
 
