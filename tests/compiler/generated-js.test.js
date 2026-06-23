@@ -208,6 +208,47 @@ module top () {
     }
 });
 
+test("kept Step 1 JavaScript bridges numbered two-pin parts", () => {
+    const numberedPart = `part NumberedTwoPin {
+    info: {
+        partNumber: "NP-1",
+        manufacture: "TestCo",
+        footprint: "./",
+        symbol: "./",
+        designatorPrefix: "J"
+    }
+
+    pins: [
+        1:1,
+        2:2,
+    ]
+}
+`;
+    const fixture = makeFixture(`#include "NumberedTwoPin.schrune"
+
+module top () {
+    net left;
+    net right;
+    part u1 = new NumberedTwoPin();
+    left ~> u1 ~> right;
+}
+`, { "NumberedTwoPin.schrune": numberedPart });
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+
+        assert.equal(result.components[0].pins[1].net, "left");
+        assert.equal(result.components[0].pins[2].net, "right");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("kept Step 1 JavaScript supports inline net declarations and multi-ties", () => {
     const fixture = makeFixture(`#include "TestPart.schrune"
 

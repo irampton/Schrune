@@ -1201,6 +1201,26 @@ function getPinFromPath(component, pathParts) {
     return value;
 }
 
+function collectLeafPinPaths(value, path = [], paths = []) {
+    if (!value || typeof value !== "object") {
+        return paths;
+    }
+
+    if (value.pad !== undefined && value.name !== undefined) {
+        paths.push([...path]);
+        return paths;
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+        if (key.startsWith("__")) {
+            continue;
+        }
+        collectLeafPinPaths(child, [...path, /^\d+$/.test(key) ? Number(key) : key], paths);
+    }
+
+    return paths;
+}
+
 function parsePathParts(pathExpression, scope = {}) {
     const parts = [];
     let rest = pathExpression;
@@ -1391,9 +1411,12 @@ function validateBridgeComponent(name, componentsByName, scope = {}) {
         throw new Error(`Unknown component "${name}"`);
     }
 
-    if (!component.pins[0] || !component.pins[1] || component.pins.filter(Boolean).length !== 2) {
+    const pinPaths = collectLeafPinPaths(component.pins);
+    if (pinPaths.length !== 2) {
         throw new Error(`Bridge middle "${name}" must be a component with 2 pins`);
     }
+
+    return pinPaths;
 }
 
 function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrides, scope = {}, modulesByName, netAliases) {
@@ -1403,16 +1426,14 @@ function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrid
     }
 
     const middleComponents = parts.slice(1, -1);
-    for (const componentName of middleComponents) {
-        validateBridgeComponent(componentName, componentsByName, scope);
-    }
+    const middlePins = middleComponents.map((componentName) => validateBridgeComponent(componentName, componentsByName, scope));
 
-    connectEndpoints(`${parts[0]}`, `${middleComponents[0]}[0]`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
+    connectEndpoints(`${parts[0]}`, `${middleComponents[0]}${renderBridgePathSuffix(middlePins[0][0])}`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
 
     for (let i = 0; i < middleComponents.length - 1; i++) {
         connectEndpoints(
-            `${middleComponents[i]}[1]`,
-            `${middleComponents[i + 1]}[0]`,
+            `${middleComponents[i]}${renderBridgePathSuffix(middlePins[i][1])}`,
+            `${middleComponents[i + 1]}${renderBridgePathSuffix(middlePins[i + 1][0])}`,
             componentsByName,
             nets,
             pinGroups,
@@ -1424,7 +1445,7 @@ function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrid
     }
 
     connectEndpoints(
-        `${middleComponents[middleComponents.length - 1]}[1]`,
+        `${middleComponents[middleComponents.length - 1]}${renderBridgePathSuffix(middlePins[middlePins.length - 1][1])}`,
         `${parts[parts.length - 1]}`,
         componentsByName,
         nets,
@@ -1434,6 +1455,18 @@ function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrid
         modulesByName,
         netAliases
     );
+}
+
+function renderBridgePathSuffix(path) {
+    if (path === undefined) {
+        return "";
+    }
+
+    if (Array.isArray(path)) {
+        return path.map((part) => /^\d+$/.test(String(part)) ? `[${part}]` : `.${part}`).join("");
+    }
+
+    return `[${path}]`;
 }
 
 function executeBlock(body, context, scope = {}) {
@@ -2457,7 +2490,7 @@ function renderEndpoint(expression, context) {
 
 function renderBridgeEndpoint(expression, pinIndex) {
     const component = componentReferenceParts(expression);
-    return `__pin(${component.componentExpression}, [${pinIndex}], ${component.componentNameExpression} + ${jsString(`_${pinIndex}`)})`;
+    return `__bridgePin(${component.componentExpression}, ${pinIndex}, ${component.componentNameExpression})`;
 }
 
 function indentLines(source, spaces) {
@@ -2661,6 +2694,32 @@ function renderRuntimeHelpers() {
         `            pin = pin[part];\n` +
         `        }\n` +
         `        return { type: "pin", pin, key: defaultNetName, defaultNetName };\n` +
+        `    }\n` +
+        `\n` +
+        `    function __leafPinPaths(value, path = [], paths = []) {\n` +
+        `        if (!value || typeof value !== "object") {\n` +
+        `            return paths;\n` +
+        `        }\n` +
+        `        if (value.pad !== undefined && value.name !== undefined) {\n` +
+        `            paths.push(path);\n` +
+        `            return paths;\n` +
+        `        }\n` +
+        `        for (const [key, entry] of Object.entries(value)) {\n` +
+        `            if (key.startsWith("__")) {\n` +
+        `                continue;\n` +
+        `            }\n` +
+        `            __leafPinPaths(entry, [...path, /^\\d+$/.test(key) ? Number(key) : key], paths);\n` +
+        `        }\n` +
+        `        return paths;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __bridgePin(component, index, componentNameExpression) {\n` +
+        `        const paths = __leafPinPaths(component.pins);\n` +
+        `        const path = paths[index];\n` +
+        `        if (!path) {\n` +
+        `            throw new Error("Bridge middle must have 2 pins");\n` +
+        `        }\n` +
+        `        return __pin(component, path, componentNameExpression + "_" + path.map((part) => String(part)).join("_"));\n` +
         `    }\n` +
         `\n` +
         `    function __setPinNet(pin, net) {\n` +

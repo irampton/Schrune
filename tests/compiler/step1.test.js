@@ -440,6 +440,42 @@ module top () {
     });
 });
 
+test("bridges a two-pin part even when its pads are numbered from one", () => {
+    const numberedPart = `part NumberedTwoPin {
+    info: {
+        partNumber: "NP-1",
+        manufacture: "TestCo",
+        footprint: "./",
+        symbol: "./",
+        designatorPrefix: "J"
+    }
+
+    pins: [
+        1:1,
+        2:2,
+    ]
+}
+`;
+
+    const fixture = makeFixture(`#include "NumberedTwoPin.schrune"
+
+module top () {
+    net left;
+    net right;
+    part u1 = new NumberedTwoPin();
+    left ~> u1 ~> right;
+}
+`, { "NumberedTwoPin.schrune": numberedPart });
+
+    try {
+        const result = step1(fixture.filePath);
+        assert.equal(result.components[0].pins[1].net, "left");
+        assert.equal(result.components[0].pins[2].net, "right");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("does not treat package as a primitive footprint", () => {
     withFixture(`#include "TestPart.schrune"
 
