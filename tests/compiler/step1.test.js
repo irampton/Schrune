@@ -229,6 +229,46 @@ module top () {
     });
 });
 
+test("declares and connects nets with inline multi-tie shorthand", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module top () {
+    rail power_3v3;
+    rail power_1v8;
+    part u1 = new TestPart();
+    net gnd ~ power_3v3.l ~ power_1v8.l ~ u1.IN;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+
+        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3_h", "power_1v8_h"].sort());
+        assert.equal(result.nets.gnd, "gnd");
+        assert.equal(result.nets.power_3v3.l, "gnd");
+        assert.equal(result.nets.power_1v8.l, "gnd");
+        assert.equal(result.components[0].pins.IN.net, "gnd");
+    });
+});
+
+test("connects multiple endpoints on one tie line", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module top () {
+    net signal;
+    part left = new TestPart();
+    part middle = new TestPart();
+    part right = new TestPart();
+    signal ~ left.IN ~ middle.IN ~ right.IN;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+
+        assert.deepEqual([...result.netList], ["signal"]);
+        assert.equal(result.components[0].pins.IN.net, "signal");
+        assert.equal(result.components[1].pins.IN.net, "signal");
+        assert.equal(result.components[2].pins.IN.net, "signal");
+    });
+});
+
 test("rejects duplicate declarations and final net names", () => {
     withFixture(`#include "TestPart.schrune"
 

@@ -6,6 +6,26 @@ const { addLcscPart } = require("./lcsc");
 const { assignDesignators, step3 } = require("./bom");
 const { writeKiCadFiles } = require("./kicad");
 
+const ANSI = {
+    reset: "\x1b[0m",
+    red: "\x1b[31m",
+    green: "\x1b[32m",
+    yellow: "\x1b[33m",
+    gray: "\x1b[90m",
+};
+
+function supportsColor(stream = process.stderr) {
+    return process.env.FORCE_COLOR || (stream && stream.isTTY && !process.env.NO_COLOR);
+}
+
+function colorize(value, color, stream = process.stderr) {
+    if (!supportsColor(stream)) {
+        return value;
+    }
+
+    return `${ANSI[color]}${value}${ANSI.reset}`;
+}
+
 function createProgress(stream = process.stderr) {
     const frames = ["-", "\\", "|", "/"];
     const enabled = Boolean(stream.isTTY);
@@ -17,7 +37,7 @@ function createProgress(stream = process.stderr) {
         if (!enabled) {
             return;
         }
-        stream.write(`\r${prefix} ${message}`);
+        stream.write(`\r${colorize(prefix, "yellow", stream)} ${message}`);
     }
 
     function clear() {
@@ -39,7 +59,7 @@ function createProgress(stream = process.stderr) {
             stopTimer();
             message = nextMessage;
             if (!enabled) {
-                stream.write(`${message}...\n`);
+                stream.write(`${colorize("...", "yellow", stream)} ${message}\n`);
                 return;
             }
             index = 0;
@@ -52,7 +72,7 @@ function createProgress(stream = process.stderr) {
         update(nextMessage) {
             message = nextMessage;
             if (!enabled) {
-                stream.write(`${message}...\n`);
+                stream.write(`${colorize("...", "yellow", stream)} ${message}\n`);
                 return;
             }
             render(frames[index]);
@@ -60,24 +80,86 @@ function createProgress(stream = process.stderr) {
         succeed(nextMessage = message) {
             stopTimer();
             if (!enabled) {
+                stream.write(`${colorize("[done]", "green", stream)} ${nextMessage}\n`);
                 return;
             }
             clear();
-            stream.write(`[done] ${nextMessage}\n`);
+            stream.write(`${colorize("[done]", "green", stream)} ${nextMessage}\n`);
         },
         fail(nextMessage = message) {
             stopTimer();
             if (!enabled) {
+                stream.write(`${colorize("[failed]", "red", stream)} ${nextMessage}\n`);
                 return;
             }
             clear();
-            stream.write(`[failed] ${nextMessage}\n`);
+            stream.write(`${colorize("[failed]", "red", stream)} ${nextMessage}\n`);
         },
         stop() {
             stopTimer();
             clear();
         },
     };
+}
+
+class CompileError extends Error {
+    constructor(message, location = {}, options = {}) {
+        super(message, options);
+        this.name = "CompileError";
+        this.filePath = location.filePath;
+        this.line = location.line;
+        this.column = location.column;
+        this.sourceLine = location.sourceLine;
+        this.statement = location.statement;
+    }
+}
+
+function sourceLocation(source, index) {
+    const boundedIndex = Math.max(0, Math.min(index, source.length));
+    const before = source.slice(0, boundedIndex);
+    const lines = before.split(/\r?\n/);
+    const line = lines.length;
+    const column = lines[lines.length - 1].length + 1;
+    const sourceLine = source.split(/\r?\n/)[line - 1] || "";
+    return { line, column, sourceLine };
+}
+
+function attachSourceLocation(error, filePath, source, index, statement) {
+    if (error instanceof CompileError || error.filePath) {
+        return error;
+    }
+
+    const location = {
+        filePath,
+        ...sourceLocation(source, index),
+        statement,
+    };
+    const wrapped = new CompileError(error.message, location, { cause: error });
+    wrapped.stack = error.stack;
+    return wrapped;
+}
+
+function formatError(error, stream = process.stderr) {
+    const lines = [];
+    const label = colorize("Error:", "red", stream);
+    lines.push(`${label} ${error.message}`);
+
+    if (error.filePath && error.line) {
+        const location = `${error.filePath}:${error.line}:${error.column || 1}`;
+        lines.push(`${colorize("at", "yellow", stream)} ${location}`);
+        if (error.sourceLine) {
+            lines.push(colorize(`  ${error.sourceLine.trimEnd()}`, "gray", stream));
+            const caretColumn = Math.max(1, error.column || 1);
+            lines.push(colorize(`  ${" ".repeat(caretColumn - 1)}^`, "red", stream));
+        }
+    }
+
+    if (error.stack) {
+        lines.push(colorize("Stack trace:", "red", stream));
+        lines.push(error.stack);
+    }
+
+    return lines.join("\n");
 }
 
 function stripComments(source) {
@@ -131,6 +213,10 @@ function extractBlocks(source, keyword, options = {}) {
         blocks.push({
             name: match[1],
             parameters: match[2] ? match[2].slice(1, -1).trim() : "",
+            startIndex: match.index,
+            openIndex,
+            bodyStart: openIndex + 1,
+            bodyEnd: closeIndex,
             body: source.slice(openIndex + 1, closeIndex),
         });
         pattern.lastIndex = closeIndex + 1;
@@ -454,22 +540,99 @@ function parseConstructorArgExpressions(args) {
     return params;
 }
 
-function parsePart(source) {
+function splitConnectionChain(statement) {
+    if (statement.includes("~>")) {
+        return undefined;
+    }
+
+    const parts = splitTopLevelOperator(statement, "~");
+    return parts.length > 1 ? parts : undefined;
+}
+
+function splitTopLevelOperator(body, operator) {
+    const parts = [];
+    let start = 0;
+    let depth = 0;
+    let inString = false;
+    let stringChar = "";
+
+    for (let i = 0; i < body.length; i++) {
+        const char = body[i];
+        const prev = body[i - 1];
+
+        if (inString) {
+            if (char === stringChar && prev !== "\\") {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === "\"" || char === "'") {
+            inString = true;
+            stringChar = char;
+            continue;
+        }
+
+        if (char === "(" || char === "[" || char === "{") {
+            depth++;
+        } else if (char === ")" || char === "]" || char === "}") {
+            depth--;
+        }
+
+        if (char === operator && depth === 0) {
+            const part = body.slice(start, i).trim();
+            if (part) {
+                parts.push(part);
+            }
+            start = i + 1;
+        }
+    }
+
+    const tail = body.slice(start).trim();
+    if (tail) {
+        parts.push(tail);
+    }
+    return parts;
+}
+
+function parseInlineNetDeclaration(statement) {
+    const match = statement.match(/^net(?:<([A-Za-z_]\w*)>)?\s+([A-Za-z_]\w*)\s*~\s*([\s\S]+)$/);
+    if (!match) {
+        return undefined;
+    }
+
+    return {
+        kind: "net",
+        type: match[1] ? normalizeNetType(match[1]) : undefined,
+        name: match[2],
+        rest: match[3].trim(),
+        inlineAnchor: true,
+    };
+}
+
+function parsePart(source, filePath) {
     const parts = extractBlocks(source, "part");
     const templates = new Map();
 
     for (const part of parts) {
-        templates.set(part.name, {
-            name: part.name,
-            info: parseInfo(part.body),
-            pins: parsePins(part.body),
-        });
+        try {
+            templates.set(part.name, {
+                name: part.name,
+                info: parseInfo(part.body),
+                pins: parsePins(part.body),
+            });
+        } catch (error) {
+            const messageMatch = error.message && error.message.match(/"([^"]+)"/);
+            const entryIndex = messageMatch ? part.body.indexOf(messageMatch[1]) : -1;
+            const locationIndex = entryIndex >= 0 ? part.bodyStart + entryIndex : part.startIndex;
+            throw attachSourceLocation(error, filePath, source, locationIndex);
+        }
     }
 
     return templates;
 }
 
-function parseModules(source) {
+function parseModules(source, filePath) {
     return new Map(extractBlocks(source, "module", { allowParameters: true }).map((module) => [
         module.name,
         {
@@ -478,6 +641,10 @@ function parseModules(source) {
                 ? module.parameters.split(",").map((parameter) => parameter.trim()).filter(Boolean)
                 : [],
             body: module.body,
+            filePath,
+            source,
+            bodyStart: module.bodyStart,
+            startIndex: module.startIndex,
         },
     ]));
 }
@@ -655,8 +822,9 @@ function loadFile(filePath, loaded = new Set()) {
     const source = stripComments(rawSource);
     const templates = createPrimitiveTemplates();
     const modules = new Map();
-    if (/^\s*#import\b/m.test(source)) {
-        throw new Error("Use #include to add files");
+    const importMatch = source.match(/^\s*#import\b/m);
+    if (importMatch) {
+        throw attachSourceLocation(new Error("Use #include to add files"), resolvedPath, source, importMatch.index);
     }
 
     const includePattern = /^\s*#include\s+["']([^"']+)["']/gm;
@@ -673,10 +841,10 @@ function loadFile(filePath, loaded = new Set()) {
         }
     }
 
-    for (const [name, template] of parsePart(source)) {
+    for (const [name, template] of parsePart(source, resolvedPath)) {
         templates.set(name, template);
     }
-    for (const [name, module] of parseModules(source)) {
+    for (const [name, module] of parseModules(source, resolvedPath)) {
         modules.set(name, module);
     }
 
@@ -929,8 +1097,8 @@ function connectNetBindings(left, right, leftExpression, rightExpression, nameOv
         return;
     }
 
-    const leftNamed = nameOverrides.has(leftExpression.trim());
-    const rightNamed = nameOverrides.has(rightExpression.trim());
+    const leftNamed = nameOverrides.has(leftExpression.trim()) || (isNetRef(left.value) && left.value.isOverride);
+    const rightNamed = nameOverrides.has(rightExpression.trim()) || (isNetRef(right.value) && right.value.isOverride);
 
     if (leftNamed && rightNamed) {
         throw new Error(`Connection joins nets "${leftName}" and "${rightName}"`);
@@ -1462,19 +1630,23 @@ function executeStatement(statement, context, scope = {}) {
         return;
     }
 
-    const connectionMatch = statement.match(/^(.+?)\s*~\s*(.+)$/);
-    if (connectionMatch) {
-        connectEndpoints(
-            connectionMatch[1].trim(),
-            connectionMatch[2].trim(),
-            componentsByName,
-            nets,
-            pinGroups,
-            nameOverrides,
-            scope,
-            modulesByName,
-            netAliases
-        );
+    const inlineNet = parseInlineNetDeclaration(statement);
+    const connectionParts = splitConnectionChain(inlineNet ? `${inlineNet.name} ~ ${inlineNet.rest}` : statement);
+    if (connectionParts) {
+        const anchor = connectionParts[0];
+        for (const endpoint of connectionParts.slice(1)) {
+            connectEndpoints(
+                anchor,
+                endpoint,
+                componentsByName,
+                nets,
+                pinGroups,
+                nameOverrides,
+                scope,
+                modulesByName,
+                netAliases
+            );
+        }
     }
 }
 
@@ -1686,7 +1858,7 @@ function applyNetNames(declarations, nameOverrides, pathPrefix = "") {
                 throw new Error(`Duplicate net name "${finalName}"`);
             }
             usedNames.add(finalName);
-            nets[declaration.name] = createNetRef(finalName, Boolean(nameOverrides.get(declaration.name)));
+            nets[declaration.name] = createNetRef(finalName, Boolean(nameOverrides.get(declaration.name)) || Boolean(declaration.inlineAnchor));
             continue;
         }
 
@@ -1739,39 +1911,51 @@ function collectModuleDeclarations(statements, pathPrefix = "") {
     const provisionalNames = new Set();
     const nameOverrides = new Map();
 
+    function addDeclaration(kind, type, name, inlineAnchor = false) {
+        if (declarationNames.has(name)) {
+            throw new Error(`Duplicate declaration "${name}"`);
+        }
+        declarationNames.add(name);
+
+        if (kind === "net") {
+            if (type) {
+                declarations.push({
+                    kind,
+                    type: normalizeNetType(type),
+                    name,
+                    inlineAnchor,
+                });
+            } else {
+                declarations.push({
+                    kind,
+                    name,
+                    defaultName: uniqueNetName(`${pathPrefix}${name}`, provisionalNames),
+                    inlineAnchor,
+                });
+            }
+        } else {
+            declarations.push({
+                kind,
+                name,
+                defaultHigh: uniqueNetName(`${pathPrefix}${name}_h`, provisionalNames),
+                defaultLow: uniqueNetName(`${pathPrefix}${name}_l`, provisionalNames),
+            });
+        }
+    }
+
     for (const statement of statements) {
+        const inlineNet = parseInlineNetDeclaration(statement);
+        if (inlineNet) {
+            addDeclaration("net", inlineNet.type, inlineNet.name, inlineNet.inlineAnchor);
+            continue;
+        }
+
         const declarationMatch = statement.match(/^(net(?:<([A-Za-z_]\w*)>)?|rail)\s+([A-Za-z_]\w*)$/);
         if (declarationMatch) {
             const kind = declarationMatch[1] === "rail" ? "rail" : "net";
             const type = declarationMatch[2];
             const name = declarationMatch[3];
-            if (declarationNames.has(name)) {
-                throw new Error(`Duplicate declaration "${name}"`);
-            }
-            declarationNames.add(name);
-
-            if (kind === "net") {
-                if (type) {
-                    declarations.push({
-                        kind,
-                        type: normalizeNetType(type),
-                        name,
-                    });
-                } else {
-                    declarations.push({
-                        kind,
-                        name,
-                        defaultName: uniqueNetName(`${pathPrefix}${name}`, provisionalNames),
-                    });
-                }
-            } else {
-                declarations.push({
-                    kind,
-                    name,
-                    defaultHigh: uniqueNetName(`${pathPrefix}${name}_h`, provisionalNames),
-                    defaultLow: uniqueNetName(`${pathPrefix}${name}_l`, provisionalNames),
-                });
-            }
+            addDeclaration(kind, type, name);
             continue;
         }
 
@@ -1787,12 +1971,33 @@ function collectModuleDeclarations(statements, pathPrefix = "") {
 function compileModule(moduleTemplate, context, options = {}) {
     const statements = splitStatements(moduleTemplate.body);
     const pathPrefix = options.pathPrefix || "";
-    const { declarations, nameOverrides } = collectModuleDeclarations(statements, pathPrefix);
+    let declarations;
+    let nameOverrides;
+    try {
+        ({ declarations, nameOverrides } = collectModuleDeclarations(statements, pathPrefix));
+    } catch (error) {
+        throw attachSourceLocation(
+            error,
+            moduleTemplate.filePath,
+            moduleTemplate.source || moduleTemplate.body,
+            moduleTemplate.startIndex || 0
+        );
+    }
     for (const [key, value] of nameOverrides) {
         context.nameOverrides.set(key, value);
         context.nameOverrides.set(`${pathPrefix}${key}`, value);
     }
-    const localNets = applyNetNames(declarations, nameOverrides, pathPrefix);
+    let localNets;
+    try {
+        localNets = applyNetNames(declarations, nameOverrides, pathPrefix);
+    } catch (error) {
+        throw attachSourceLocation(
+            error,
+            moduleTemplate.filePath,
+            moduleTemplate.source || moduleTemplate.body,
+            moduleTemplate.startIndex || 0
+        );
+    }
     context.netScopes.push(localNets);
     const localContext = {
         ...context,
@@ -1807,7 +2012,21 @@ function compileModule(moduleTemplate, context, options = {}) {
     };
 
     for (const statement of statements) {
-        executeStatement(statement, localContext, scope);
+        try {
+            executeStatement(statement, localContext, scope);
+        } catch (error) {
+            const statementIndex = moduleTemplate.body.indexOf(statement);
+            const locationIndex = statementIndex >= 0
+                ? moduleTemplate.bodyStart + statementIndex
+                : moduleTemplate.startIndex || 0;
+            throw attachSourceLocation(
+                error,
+                moduleTemplate.filePath,
+                moduleTemplate.source || moduleTemplate.body,
+                locationIndex,
+                statement
+            );
+        }
     }
 
     return {
@@ -1923,10 +2142,10 @@ function finalizeCompilation(context, topModule) {
 }
 
 function step1(filePath) {
-    const { modules, templates } = loadFile(filePath);
+    const { source, modules, templates } = loadFile(filePath);
     const topModule = modules.get("top");
     if (!topModule) {
-        throw new Error("No top module found");
+        throw attachSourceLocation(new Error("No top module found"), path.resolve(filePath), source, 0);
     }
 
     const context = {
@@ -2032,38 +2251,50 @@ function collectTopDeclarations(statements) {
     const provisionalNames = new Set();
     const nameOverrides = new Map();
 
+    function addDeclaration(declaration) {
+        const { kind, type, name } = declaration;
+        if (declarationNames.has(name)) {
+            throw new Error(`Duplicate declaration "${name}"`);
+        }
+        declarationNames.add(name);
+
+        if (kind === "net") {
+            if (type) {
+                declarations.push({
+                    kind,
+                    type,
+                    name,
+                    inlineAnchor: declaration.inlineAnchor,
+                });
+                return;
+            }
+
+            declarations.push({
+                kind,
+                name,
+                defaultName: uniqueNetName(name, provisionalNames),
+                inlineAnchor: declaration.inlineAnchor,
+            });
+        } else {
+            declarations.push({
+                kind,
+                name,
+                defaultHigh: uniqueNetName(`${name}_h`, provisionalNames),
+                defaultLow: uniqueNetName(`${name}_l`, provisionalNames),
+            });
+        }
+    }
+
     for (const statement of statements) {
+        const inlineNet = parseInlineNetDeclaration(statement);
+        if (inlineNet) {
+            addDeclaration(inlineNet);
+            continue;
+        }
+
         const declaration = parseNetDeclaration(statement);
         if (declaration) {
-            const { kind, type, name } = declaration;
-            if (declarationNames.has(name)) {
-                throw new Error(`Duplicate declaration "${name}"`);
-            }
-            declarationNames.add(name);
-
-            if (kind === "net") {
-                if (type) {
-                    declarations.push({
-                        kind,
-                        type,
-                        name,
-                    });
-                    continue;
-                }
-
-                declarations.push({
-                    kind,
-                    name,
-                    defaultName: uniqueNetName(name, provisionalNames),
-                });
-            } else {
-                declarations.push({
-                    kind,
-                    name,
-                    defaultHigh: uniqueNetName(`${name}_h`, provisionalNames),
-                    defaultLow: uniqueNetName(`${name}_l`, provisionalNames),
-                });
-            }
+            addDeclaration(declaration);
             continue;
         }
 
@@ -2322,9 +2553,13 @@ function renderStatement(statement, indent = 4, context = { netNames: new Set(),
         return lines;
     }
 
-    const connectionMatch = statement.match(/^(.+?)\s*~\s*(.+)$/);
-    if (connectionMatch) {
-        return [`${padding}__connect(${renderEndpoint(connectionMatch[1], context)}, ${renderEndpoint(connectionMatch[2], context)});`];
+    const inlineNet = parseInlineNetDeclaration(statement);
+    const connectionParts = splitConnectionChain(inlineNet ? `${inlineNet.name} ~ ${inlineNet.rest}` : statement);
+    if (connectionParts) {
+        const anchor = connectionParts[0];
+        return connectionParts.slice(1).map((endpoint) => (
+            `${padding}__connect(${renderEndpoint(anchor, context)}, ${renderEndpoint(endpoint, context)});`
+        ));
     }
 
     throw new Error(`Cannot render statement "${statement}"`);
@@ -2642,7 +2877,7 @@ function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTe
                 return `    const ${declaration.name} = __declareNetGroup(${jsString(declaration.name)}, ${jsString(declaration.type)});`;
             }
             const finalName = nameOverrides.get(declaration.name) || declaration.defaultName;
-            return `    const ${declaration.name} = __declareNet(${jsString(declaration.name)}, __scopeName(${jsString(finalName)}), ${nameOverrides.has(declaration.name)});`;
+            return `    const ${declaration.name} = __declareNet(${jsString(declaration.name)}, __scopeName(${jsString(finalName)}), ${nameOverrides.has(declaration.name) || Boolean(declaration.inlineAnchor)});`;
         }
 
         const highKey = `${declaration.name}.h`;
@@ -2822,7 +3057,7 @@ async function main() {
         const result = writeKiCadFiles(inputPath, bom);
         progress.succeed("Sent to KiCad");
 
-        console.log(`Build successful: ${result.components.length} components, ${result.netList.size} nets.`);
+        console.log(colorize(`Build successful: ${result.components.length} components, ${result.netList.size} nets.`, "green", process.stdout));
     } catch (error) {
         progress.fail("Build failed");
         throw error;
@@ -2832,15 +3067,12 @@ async function main() {
 if (require.main === module) {
     main().catch((error) => {
         if (error instanceof UsageError) {
-            console.error(error.message);
+            console.error(colorize(error.message, "red"));
             process.exitCode = 1;
             return;
         }
 
-        console.error(`Error: ${error.message}`);
-        if (process.env.DEBUG && error.stack) {
-            console.error(error.stack);
-        }
+        console.error(formatError(error));
         process.exitCode = 1;
     });
 }

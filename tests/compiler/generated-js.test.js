@@ -208,6 +208,37 @@ module top () {
     }
 });
 
+test("kept Step 1 JavaScript supports inline net declarations and multi-ties", () => {
+    const fixture = makeFixture(`#include "TestPart.schrune"
+
+module top () {
+    rail power_3v3;
+    rail power_1v8;
+    part u1 = new TestPart();
+    part u2 = new TestPart();
+    net gnd ~ power_3v3.l ~ power_1v8.l ~ u1.IN ~ u2.IN;
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+
+        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3_h", "power_1v8_h"].sort());
+        assert.equal(result.nets.gnd, "gnd");
+        assert.equal(result.nets.power_3v3.l, "gnd");
+        assert.equal(result.nets.power_1v8.l, "gnd");
+        assert.equal(result.components[0].pins.IN.net, "gnd");
+        assert.equal(result.components[1].pins.IN.net, "gnd");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("kept Step 1 JavaScript supports vals and module instances", () => {
     const fixture = makeFixture(`module child () {
     rail v;

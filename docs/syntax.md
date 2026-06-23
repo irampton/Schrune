@@ -247,8 +247,14 @@ Schrune supports several wiring forms:
 
 ```schrune
 left[1] ~ right[1];
+net gnd ~ power_3v3.l ~ power_1v8.l;
+signal ~ left.IN ~ right.IN;
 left[1] ~> resistor ~> right[1];
 ```
+
+Declaring a net inline with `~` is shorthand for declaring the net and connecting
+that net to each later endpoint. Multiple `~` endpoints on one line connect each
+later endpoint back to the first endpoint.
 
 The bridge operator `~>` is a convenience for chaining through a two-pin part.
 
