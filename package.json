@@ -7,6 +7,7 @@
     "schrune": "src/app.js"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "setup:easyeda2kicad": "node scripts/install-easyeda2kicad.js"
   }
 }

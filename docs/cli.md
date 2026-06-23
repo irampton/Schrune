@@ -11,6 +11,16 @@ npm link
 
 After linking, `schrune` is available on your `PATH`.
 
+If you plan to import LCSC parts, install the Python converter into the active
+Python environment first:
+
+```bash
+npm run setup:easyeda2kicad
+```
+
+If you need a specific interpreter, set `EASYEDA2KICAD_PYTHON` before running
+the script.
+
 ## Commands
 
 ### `schrune build <file.schrune>`
@@ -31,7 +41,8 @@ Output:
 
 ### `schrune add <CXXXX>`
 
-Download or generate a part library entry for an LCSC part number.
+Download a part library entry for an LCSC part number. This requires the Python
+`easyeda2kicad` package to be installed in a usable interpreter.
 
 Example:
 
@@ -85,4 +96,3 @@ The build writes:
 
 * `#include` resolves local Schrune files and `.schrune` files under the source tree.
 * The CLI expects a `.schrune` input file for build mode.
-

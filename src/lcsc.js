@@ -5,9 +5,6 @@ const { spawnSync } = require("child_process");
 
 const EASYEDA_COMPONENT_API = "https://easyeda.com/api/products";
 const EASYEDA_STEP_MODEL_API = "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y";
-const KICAD_GENERATOR_VERSION = "10.0";
-const KICAD_SYMBOL_LIB_VERSION = 20251024;
-const KICAD_FOOTPRINT_VERSION = 20260206;
 
 function assertLcscPartNumber(partNumber) {
     if (!/^C\d+$/i.test(partNumber)) {
@@ -233,253 +230,97 @@ function renderSchrunePart(partName, info, pins) {
         `}\n`;
 }
 
-function kicadString(value) {
-    return JSON.stringify(String(value));
-}
-
-function renderKiCadSymbol(partName, info, pins) {
-    const prefix = info.designatorPrefix || "U";
-    const pinSpacing = 2.54;
-    const leftPins = pins.filter((_, index) => index % 2 === 0);
-    const rightPins = pins.filter((_, index) => index % 2 === 1);
-    const maxSidePins = Math.max(leftPins.length, rightPins.length, 1);
-    const height = Math.max(10.16, (maxSidePins + 1) * pinSpacing);
-    const width = 20.32;
-    const top = height / 2;
-    const leftX = -width / 2;
-    const rightX = width / 2;
-
-    function renderPin(pin, sidePins, side) {
-        const index = sidePins.indexOf(pin);
-        const y = top - ((index + 1) * pinSpacing);
-        const x = side === "left" ? leftX - pinSpacing : rightX + pinSpacing;
-        const angle = side === "left" ? 0 : 180;
-        return `      (pin passive line (at ${x.toFixed(2)} ${y.toFixed(2)} ${angle}) (length ${pinSpacing.toFixed(2)})\n` +
-            `        (name ${kicadString(pin.name)} (effects (font (size 1.27 1.27))))\n` +
-            `        (number ${kicadString(pin.pad)} (effects (font (size 1.27 1.27))))\n` +
-            `      )`;
+function normalizePythonCommand(command) {
+    if (!command || typeof command !== "string") {
+        return undefined;
     }
 
-    const pinLines = [
-        ...leftPins.map((pin) => renderPin(pin, leftPins, "left")),
-        ...rightPins.map((pin) => renderPin(pin, rightPins, "right")),
+    return command.trim() || undefined;
+}
+
+function pythonCandidates(options = {}) {
+    const candidates = [
+        normalizePythonCommand(options.python),
+        normalizePythonCommand(process.env.EASYEDA2KICAD_PYTHON),
+        "python3",
+        "python",
+    ].filter(Boolean);
+
+    return [...new Set(candidates)];
+}
+
+function pythonEnvironment(pythonPath) {
+    const env = { ...process.env };
+    if (pythonPath || process.env.PYTHONPATH) {
+        env.PYTHONPATH = [pythonPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter);
+    }
+    return env;
+}
+
+function formatBridgeFailure(attempts) {
+    const lines = [
+        "easyeda2kicad is required to import LCSC parts.",
+        "Run `npm run setup:easyeda2kicad` first, or configure a usable Python interpreter.",
     ];
 
-    return `(kicad_symbol_lib (version ${KICAD_SYMBOL_LIB_VERSION}) (generator "Schrune") (generator_version "${KICAD_GENERATOR_VERSION}")\n` +
-        `  (symbol ${kicadString(partName)} (pin_names (offset 1.016)) (in_bom yes) (on_board yes)\n` +
-        `    (property "Reference" ${kicadString(`${prefix}?`)} (at 0 ${(top + 2.54).toFixed(2)} 0)\n` +
-        `      (effects (font (size 1.27 1.27)))\n` +
-        `    )\n` +
-        `    (property "Value" ${kicadString(partName)} (at 0 ${(-top - 2.54).toFixed(2)} 0)\n` +
-        `      (effects (font (size 1.27 1.27)))\n` +
-        `    )\n` +
-        `    (property "Footprint" ${kicadString(info.footprint || "")} (at 0 ${(-top - 5.08).toFixed(2)} 0) (hide yes)\n` +
-        `      (effects (font (size 1.27 1.27)))\n` +
-        `    )\n` +
-        `    (property "Datasheet" "" (at 0 0 0) (hide yes)\n` +
-        `      (effects (font (size 1.27 1.27)))\n` +
-        `    )\n` +
-        `    (symbol ${kicadString(`${partName}_0_1`)}\n` +
-        `      (rectangle (start ${leftX.toFixed(2)} ${top.toFixed(2)}) (end ${rightX.toFixed(2)} ${(-top).toFixed(2)})\n` +
-        `        (stroke (width 0.254) (type default))\n` +
-        `        (fill (type background))\n` +
-        `      )\n` +
-        `${pinLines.join("\n")}\n` +
-        `    )\n` +
-        `  )\n` +
-        `)\n`;
-}
-
-function parseEasyEdaPads(footprintData) {
-    const shapes = footprintData && footprintData.shape;
-    if (!Array.isArray(shapes)) {
-        return [];
+    if (attempts.length) {
+        lines.push(`Tried: ${attempts.join("; ")}`);
     }
 
-    const originX = Number(footprintData.head && footprintData.head.x) || 0;
-    const originY = Number(footprintData.head && footprintData.head.y) || 0;
-    return shapes
-        .filter((shape) => typeof shape === "string" && shape.startsWith("PAD~"))
-        .map((shape) => {
-            const fields = shape.split("~");
-            const layer = fields[6] || "1";
-            const width = Math.abs(Number(fields[4]) || 1);
-            const height = Math.abs(Number(fields[5]) || 1);
-            const explicitDrill = Number(fields[9]) || Number(fields[13]) || 0;
-            return {
-                shape: String(fields[1] || "RECT").toLowerCase(),
-                x: Number(fields[2]) - originX,
-                y: -(Number(fields[3]) - originY),
-                width,
-                height,
-                layer,
-                number: fields[8] || "",
-                drill: explicitDrill || (layer === "11" ? Math.min(width, height) * 0.5 : 0),
-                rotation: Number(fields[11]) || 0,
-            };
-        })
-        .filter((pad) => pad.number);
-}
-
-function parseEasyEdaGraphics(footprintData) {
-    const shapes = footprintData && footprintData.shape;
-    if (!Array.isArray(shapes)) {
-        return [];
-    }
-
-    const originX = Number(footprintData.head && footprintData.head.x) || 0;
-    const originY = Number(footprintData.head && footprintData.head.y) || 0;
-    const graphics = [];
-
-    for (const shape of shapes) {
-        if (typeof shape !== "string") {
-            continue;
-        }
-
-        const fields = shape.split("~");
-        if (fields[0] === "TRACK") {
-            const width = Number(fields[1]) || 0.12;
-            const points = String(fields[3] || "").split(" ").map((point) => {
-                const [x, y] = point.split(",").map(Number);
-                return { x: x - originX, y: -(y - originY) };
-            }).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
-
-            for (let i = 0; i < points.length - 1; i++) {
-                graphics.push({
-                    type: "line",
-                    start: points[i],
-                    end: points[i + 1],
-                    width,
-                });
-            }
-        }
-
-        if (fields[0] === "RECT") {
-            const x = Number(fields[1]) - originX;
-            const y = -(Number(fields[2]) - originY);
-            const width = Math.abs(Number(fields[3]) || 0);
-            const height = Math.abs(Number(fields[4]) || 0);
-            if (width && height) {
-                graphics.push({
-                    type: "rect",
-                    start: { x, y },
-                    end: { x: x + width, y: y - height },
-                    width: Number(fields[5]) || 0.12,
-                });
-            }
-        }
-
-        if (fields[0] === "CIRCLE") {
-            const x = Number(fields[1]) - originX;
-            const y = -(Number(fields[2]) - originY);
-            const radius = Math.abs(Number(fields[3]) || 0);
-            if (radius) {
-                graphics.push({
-                    type: "circle",
-                    center: { x, y },
-                    end: { x: x + radius, y },
-                    width: Number(fields[4]) || 0.12,
-                });
-            }
-        }
-    }
-
-    return graphics;
-}
-
-function renderGraphic(graphic) {
-    if (graphic.type === "line") {
-        return `  (fp_line (start ${graphic.start.x.toFixed(4)} ${graphic.start.y.toFixed(4)}) ` +
-            `(end ${graphic.end.x.toFixed(4)} ${graphic.end.y.toFixed(4)})\n` +
-            `    (stroke (width ${graphic.width.toFixed(4)}) (type solid)) (layer "F.SilkS"))`;
-    }
-
-    if (graphic.type === "rect") {
-        return `  (fp_rect (start ${graphic.start.x.toFixed(4)} ${graphic.start.y.toFixed(4)}) ` +
-            `(end ${graphic.end.x.toFixed(4)} ${graphic.end.y.toFixed(4)})\n` +
-            `    (stroke (width ${graphic.width.toFixed(4)}) (type solid)) (fill none) (layer "F.SilkS"))`;
-    }
-
-    return `  (fp_circle (center ${graphic.center.x.toFixed(4)} ${graphic.center.y.toFixed(4)}) ` +
-        `(end ${graphic.end.x.toFixed(4)} ${graphic.end.y.toFixed(4)})\n` +
-        `    (stroke (width ${graphic.width.toFixed(4)}) (type solid)) (fill none) (layer "F.SilkS"))`;
-}
-
-function isThroughHolePad(pad) {
-    return pad.drill > 0 || pad.layer === "11";
-}
-
-function renderKiCadFootprint(partName, footprintData, stepFileName, modelProjectDir = `parts/${partName}`) {
-    const pads = parseEasyEdaPads(footprintData);
-    const padLines = pads.map((pad) => {
-        const shape = pad.shape === "ellipse" || pad.shape === "oval" ? "oval" : pad.shape === "circle" ? "circle" : "rect";
-        const throughHole = isThroughHolePad(pad);
-        const padType = throughHole ? "thru_hole" : "smd";
-        const layers = throughHole ? `"*.Cu" "*.Mask"` : `"F.Cu" "F.Paste" "F.Mask"`;
-        const drill = throughHole ? ` (drill ${pad.drill.toFixed(4)})` : "";
-        return `  (pad ${kicadString(pad.number)} ${padType} ${shape} (at ${pad.x.toFixed(4)} ${pad.y.toFixed(4)} ${pad.rotation}) ` +
-            `(size ${pad.width.toFixed(4)} ${pad.height.toFixed(4)}) (layers ${layers})${drill})`;
-    });
-    const graphicLines = parseEasyEdaGraphics(footprintData).map(renderGraphic);
-    const model = stepFileName
-        ? `\n  (model "\${KIPRJMOD}/${modelProjectDir.replace(/\\/g, "/")}/${stepFileName}"\n` +
-            `    (offset (xyz 0 0 0))\n` +
-            `    (scale (xyz 1 1 1))\n` +
-            `    (rotate (xyz 0 0 0))\n` +
-            `  )`
-        : "";
-
-    const attr = pads.some(isThroughHolePad) ? "through_hole" : "smd";
-    return `(footprint ${kicadString(partName)} (version ${KICAD_FOOTPRINT_VERSION}) (generator "Schrune") (generator_version "${KICAD_GENERATOR_VERSION}")\n` +
-        `  (attr ${attr})\n` +
-        `  (fp_text reference "REF**" (at 0 -5 0) (layer "F.SilkS")\n` +
-        `    (effects (font (size 1 1) (thickness 0.15)))\n` +
-        `  )\n` +
-        `  (fp_text value ${kicadString(partName)} (at 0 5 0) (layer "F.Fab")\n` +
-        `    (effects (font (size 1 1) (thickness 0.15)))\n` +
-        `  )\n` +
-        `${graphicLines.length ? `${graphicLines.join("\n")}\n` : ""}` +
-        `${padLines.join("\n")}${model}\n` +
-        `)\n`;
+    return lines.join(" ");
 }
 
 function runEasyeda2KicadBridge(partName, component, destinationDir, modelProjectDir, options = {}) {
+    if (typeof options.bridgeRunner === "function") {
+        return options.bridgeRunner(partName, component, destinationDir, modelProjectDir, options);
+    }
+
     const pythonPath = options.easyeda2KicadPythonPath || process.env.EASYEDA2KICAD_PYTHONPATH;
     const bridgePath = path.resolve(__dirname, "..", "scripts", "easyeda2kicad_bridge.py");
     const inputPath = path.join(os.tmpdir(), `schrune-${partName}-${Date.now()}.easyeda.json`);
     fs.writeFileSync(inputPath, JSON.stringify(component));
 
-    const env = { ...process.env };
-    if (pythonPath || process.env.PYTHONPATH) {
-        env.PYTHONPATH = [pythonPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter);
-    }
-    const result = spawnSync(options.python || "python", [
-        bridgePath,
-        "--input", inputPath,
-        "--output-dir", destinationDir,
-        "--symbol-file", `${partName}.kicad_sym`,
-        "--footprint-file", `${partName}.kicad_mod`,
-        "--model-path", modelProjectDir ? `\${KIPRJMOD}/${modelProjectDir}` : "${KIPRJMOD}",
-        "--footprint-lib", "Schrune",
-    ], {
-        env,
-        encoding: "utf8",
-    });
+    const attempts = [];
+    const env = pythonEnvironment(pythonPath);
+    const candidateList = pythonCandidates(options);
 
     try {
-        fs.unlinkSync(inputPath);
-    } catch (_error) {
-        // Best-effort cleanup only.
-    }
+        for (const python of candidateList) {
+            const result = spawnSync(python, [
+                bridgePath,
+                "--input", inputPath,
+                "--output-dir", destinationDir,
+                "--symbol-file", `${partName}.kicad_sym`,
+                "--footprint-file", `${partName}.kicad_mod`,
+                "--model-path", modelProjectDir ? `\${KIPRJMOD}/${modelProjectDir}` : "${KIPRJMOD}",
+                "--footprint-lib", "Schrune",
+            ], {
+                env,
+                encoding: "utf8",
+            });
 
-    if (result.status !== 0) {
-        if (options.requireEasyeda2Kicad) {
-            throw new Error(`easyeda2kicad failed: ${result.stderr || result.stdout}`);
+            if (result.status === 0) {
+                const stdout = String(result.stdout || "").trim();
+                const lastLine = stdout.split(/\r?\n/).pop();
+                return lastLine ? JSON.parse(lastLine) : {};
+            }
+
+            const reason = result.error
+                ? result.error.code === "ENOENT"
+                    ? `${python} not found`
+                    : `${python} failed to start: ${result.error.message}`
+                : `${python} exited ${result.status}${result.stderr ? `: ${result.stderr.trim()}` : ""}`;
+            attempts.push(reason);
         }
-        return undefined;
+    } finally {
+        try {
+            fs.unlinkSync(inputPath);
+        } catch (_error) {
+            // Best-effort cleanup only.
+        }
     }
 
-    return JSON.parse(result.stdout.trim().split(/\r?\n/).pop());
+    throw new Error(formatBridgeFailure(attempts));
 }
 
 function modelDownloadCandidates(component) {
@@ -563,17 +404,11 @@ async function addLcscPart(partNumber, options = {}) {
         model: model.fileName ? `./${model.fileName}` : undefined,
     });
     const schrunePath = path.join(destinationDir, `${partName}.schrune`);
-    const footprintData = component.packageDetail && component.packageDetail.dataStr || {};
-    const bridged = runEasyeda2KicadBridge(partName, component, destinationDir, modelProjectDir, options);
+    const bridged = await runEasyeda2KicadBridge(partName, component, destinationDir, modelProjectDir, options);
     if (!bridged) {
-        fs.writeFileSync(path.join(destinationDir, `${partName}.kicad_sym`), renderKiCadSymbol(partName, info, pins));
-        fs.writeFileSync(path.join(destinationDir, `${partName}.kicad_mod`), renderKiCadFootprint(
-            partName,
-            footprintData,
-            model.downloaded ? model.fileName : undefined,
-            modelProjectDir
-        ));
+        throw new Error("easyeda2kicad bridge did not complete successfully");
     }
+
     fs.writeFileSync(schrunePath, renderSchrunePart(partName, info, pins));
 
     return {
@@ -591,11 +426,6 @@ module.exports = {
     fetchEasyEdaComponent,
     isLikelyStepModel,
     modelDownloadCandidates,
-    parseEasyEdaPads,
-    parseEasyEdaGraphics,
-    renderKiCadFootprint,
-    renderKiCadSymbol,
-    renderSchrunePart,
     runEasyeda2KicadBridge,
     sanitizeIdentifier,
 };

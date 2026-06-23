@@ -16,16 +16,14 @@ shrune add C2040
 files next to the source `.schrune` files.
 
 `add` imports an LCSC part into `./parts/<PartName>/`. It downloads the EasyEDA
-component data, writes KiCad symbol and footprint files (`.kicad_sym` and
-`.kicad_mod`), attempts to download the 3D model as a `.step` through EasyEDA's
-model UUID endpoint, and writes a `<PartName>.schrune` file with component
-metadata and pin mappings. When the Python `easyeda2kicad` package is available
-on `EASYEDA2KICAD_PYTHONPATH` or the active Python environment, the importer uses
-that package to export the symbol and footprint, matching the import/export path
-used by atopile. If it is not available, the compiler falls back to the built-in
-minimal EasyEDA renderer. If the STEP payload is empty, an EasyEDA error
-document, or otherwise not directly available, the part is generated without a
-model file.
+component data, exports KiCad symbol and footprint files (`.kicad_sym` and
+`.kicad_mod`) through the Python `easyeda2kicad` package, attempts to download
+the 3D model as a `.step` through EasyEDA's model UUID endpoint, and writes a
+`<PartName>.schrune` file with component metadata and pin mappings. The Python
+package must already be installed in a usable interpreter before the importer is
+needed. Use `npm run setup:easyeda2kicad` to install it into the current Python
+environment. If the STEP payload is empty, an EasyEDA error document, or
+otherwise not directly available, the part is generated without a model file.
 
 ## Step 1 - Compile to JS
 
@@ -327,11 +325,8 @@ infer missing drills, silkscreen, or through-hole attributes. The only footprint
 edits made during board generation are board-instance data that KiCad needs:
 placement, UUIDs, reference/value text, and pad net assignments.
 
-The LCSC importer prefers `easyeda2kicad` exports for newly added parts. The
-fallback renderer preserves EasyEDA through-hole drill hints and simple `TRACK`,
-`RECT`, and `CIRCLE` footprint graphics, but it is intentionally less complete
-than the converter. Existing downloaded footprint files are not mechanically
-repaired by Step 4.
+The LCSC importer requires `easyeda2kicad` exports for newly added parts.
+Existing downloaded footprint files are not mechanically repaired by Step 4.
 
 Generated schematic and PCB files currently use the KiCad file versions that
 have been verified to open across the local examples. KiCad may still offer to
