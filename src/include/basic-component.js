@@ -14,6 +14,9 @@ class BasicComponent {
             designatorPrefix: options.designatorPrefix,
         };
         this.info.footprint = params.footprint;
+        if (params.LCSC || params.lcsc) {
+            this.info.LCSC = params.LCSC || params.lcsc;
+        }
         Object.assign(this, params);
         this.footprint = params.footprint;
         this.pins = [

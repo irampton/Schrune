@@ -244,6 +244,12 @@ The lock has two readable sections:
     ],
     "selectors": {
         "R1": "C1234"
+    },
+    "selectionCache": {
+        "{\"type\":\"Resistor\",\"value\":\"10kOhm\",\"footprint\":\"0402\",\"voltage\":null,\"power\":null,\"tolerance\":null}": {
+            "lcsc": "C1234",
+            "partName": "P_1206W4F1002T5E"
+        }
     }
 }
 ```
@@ -253,6 +259,12 @@ The lock has two readable sections:
 needs a selected part to the LCSC number it should use. Normal builds check this
 file before making any JLC API call. `--no-parts-lock` ignores the lock for
 selection and does not update it.
+
+`selectionCache` maps a stable generic-component filter key to the selected
+LCSC part so matching components can reuse the same result without repeating the
+JLC search or importer work. The compiler updates the lock after each successful
+generic-part resolution, so a later failure leaves already-imported parts
+recorded for the next run.
 
 For unlocked generic parts, the selector searches JLC using value, footprint,
 and type. Candidates are sorted to prefer:

@@ -132,8 +132,8 @@ test("step3 selects unlocked generic parts and updates parts-lock", async () => 
                     value: "100nF",
                     footprint: "0402",
                     voltage: "16V",
-                    power: undefined,
-                    tolerance: undefined,
+                    power: null,
+                    tolerance: null,
                 });
                 return {
                     lcsc: "C1525",
@@ -153,6 +153,129 @@ test("step3 selects unlocked generic parts and updates parts-lock", async () => 
         const lock = JSON.parse(fs.readFileSync(lockPathFor(fixture.filePath), "utf8"));
         assert.equal(lock.parts[0].lcsc, "C1525");
         assert.deepEqual(lock.selectors, { C1: "C1525" });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("step3 caches identical generic-part selections within a single run", async () => {
+    const { fixture, compiled } = compile(`module top () {
+    r1 = new Resistor(value = "10k", footprint = "0603");
+    r2 = new Resistor(value = "10k", footprint = "0603");
+}
+`);
+
+    try {
+        let selectCalls = 0;
+        const result = await step3(fixture.filePath, compiled, {
+            downloadParts: false,
+            selectPart: async (_component, filters) => {
+                selectCalls++;
+                assert.deepEqual(filters, {
+                    type: "Resistor",
+                    value: "10k",
+                    footprint: "0603",
+                    voltage: null,
+                    power: null,
+                    tolerance: null,
+                });
+                return {
+                    lcsc: "C25804",
+                    manufacturer: "YAGEO",
+                    mpn: "RC0603FR-0710KL",
+                    package: "0603",
+                };
+            },
+        });
+
+        assert.equal(selectCalls, 1);
+        assert.equal(result.partsLock.parts.length, 1);
+        assert.deepEqual(result.partsLock.selectors, {
+            R1: "C25804",
+            R2: "C25804",
+        });
+        assert.deepEqual(Object.keys(result.partsLock.selectionCache).length, 1);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("step3 reuses a cached selection from parts-lock without calling the selector", async () => {
+    const { fixture, compiled } = compile(`module top () {
+    c1 = new Capacitor(value = "100nF", footprint = "0402");
+}
+`);
+
+    try {
+        const lockPath = lockPathFor(fixture.filePath);
+        fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+        fs.writeFileSync(lockPath, `${JSON.stringify({
+            version: 1,
+            parts: [{
+                lcsc: "C1525",
+                manufacturer: "Samsung",
+                mpn: "CL05B104KO5NNNC",
+                package: "0402",
+            }],
+            selectors: {},
+            selectionCache: {
+                '{"type":"Capacitor","value":"100nF","footprint":"0402","voltage":null,"power":null,"tolerance":null}': {
+                    lcsc: "C1525",
+                    partName: "CL05B104KO5NNNC",
+                },
+            },
+        }, null, 2)}\n`);
+
+        let selectCalls = 0;
+        const result = await step3(fixture.filePath, compiled, {
+            downloadParts: false,
+            selectPart: async () => {
+                selectCalls++;
+                throw new Error("selector should not be called when cache is populated");
+            },
+        });
+
+        assert.equal(selectCalls, 0);
+        assert.equal(result.components[0].info.LCSC, "C1525");
+        const lock = readPartsLock(fixture.filePath);
+        assert.deepEqual(lock.selectors, { C1: "C1525" });
+        assert.equal(lock.selectionCache['{"type":"Capacitor","value":"100nF","footprint":"0402","voltage":null,"power":null,"tolerance":null}'].lcsc, "C1525");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("step3 keeps earlier lock updates when a later part selection fails", async () => {
+    const { fixture, compiled } = compile(`module top () {
+    c1 = new Capacitor(value = "100nF", footprint = "0402");
+    r1 = new Resistor(value = "10k", footprint = "0603");
+}
+`);
+
+    try {
+        let selectCalls = 0;
+        await assert.rejects(step3(fixture.filePath, compiled, {
+            downloadParts: false,
+            selectPart: async (component) => {
+                selectCalls++;
+                if (selectCalls === 1) {
+                    return {
+                        lcsc: "C1525",
+                        manufacturer: "Samsung",
+                        mpn: "CL05B104KO5NNNC",
+                        package: "0402",
+                    };
+                }
+                throw new Error(`no match for ${component.designator}`);
+            },
+        }));
+
+        assert.equal(selectCalls, 2);
+        const lock = readPartsLock(fixture.filePath);
+        assert.equal(lock.parts.length, 1);
+        assert.equal(Object.keys(lock.selectors).length, 1);
+        assert.equal(Object.keys(lock.selectionCache).length, 1);
+        assert.equal(lock.selectors.C1 || lock.selectors.R1, "C1525");
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
@@ -185,7 +308,7 @@ test("step3 can skip parts-lock writes", async () => {
 
 test("step3 honors LCSC-selected generic primitives without searching JLC", async () => {
     const fixture = makeFixture(`module top () {
-    part d1 = new Diode(LCSC="C8678");
+    part d1 = new Diode(value = "1N4148", LCSC="C8678");
 }
 `);
     try {
@@ -280,6 +403,7 @@ test("readPartsLock returns an empty normalized lock when none exists", () => {
             version: 1,
             parts: [],
             selectors: {},
+            selectionCache: {},
         });
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });

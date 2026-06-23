@@ -81,7 +81,7 @@ function lockPathFor(filePath) {
 function readPartsLock(filePath) {
     const lockPath = lockPathFor(filePath);
     if (!fs.existsSync(lockPath)) {
-        return { version: LOCK_VERSION, parts: [], selectors: {} };
+        return { version: LOCK_VERSION, parts: [], selectors: {}, selectionCache: {} };
     }
     return JSON.parse(fs.readFileSync(lockPath, "utf8"));
 }
@@ -99,17 +99,78 @@ function isGenericComponent(component) {
 function componentFilters(component) {
     return {
         type: componentKind(component),
-        value: component.value,
-        footprint: component.footprint || undefined,
-        voltage: component.voltage || component.maxVoltage,
-        power: component.power || component.maxPower,
-        tolerance: component.tolerance,
+        value: component.value ?? null,
+        footprint: component.footprint ?? null,
+        voltage: component.voltage ?? component.maxVoltage ?? null,
+        power: component.power ?? component.maxPower ?? null,
+        tolerance: component.tolerance ?? null,
     };
+}
+
+function selectionKeyFromFilters(filters) {
+    return JSON.stringify({
+        type: filters.type ?? null,
+        value: filters.value ?? null,
+        footprint: filters.footprint ?? null,
+        voltage: filters.voltage ?? null,
+        power: filters.power ?? null,
+        tolerance: filters.tolerance ?? null,
+    });
+}
+
+function componentSelectionKey(component) {
+    return selectionKeyFromFilters(componentFilters(component));
+}
+
+function normalizeSelectionCacheValue(value) {
+    if (typeof value === "string") {
+        return {
+            lcsc: String(value).toUpperCase(),
+        };
+    }
+
+    if (!value || typeof value !== "object") {
+        return undefined;
+    }
+
+    const lcsc = String(value.lcsc || value.LCSC || "").toUpperCase();
+    if (!lcsc) {
+        return undefined;
+    }
+
+    return {
+        lcsc,
+        partName: value.partName || value.part_name,
+    };
+}
+
+function normalizeSelectionCache(selectionCache = {}) {
+    const normalized = {};
+    for (const [key, value] of Object.entries(selectionCache)) {
+        const normalizedValue = normalizeSelectionCacheValue(value);
+        if (!normalizedValue) {
+            continue;
+        }
+
+        let normalizedKey = key;
+        try {
+            const parsed = JSON.parse(key);
+            if (parsed && typeof parsed === "object") {
+                normalizedKey = selectionKeyFromFilters(parsed);
+            }
+        } catch {
+            // Keep non-JSON keys as-is.
+        }
+
+        normalized[normalizedKey] = normalizedValue;
+    }
+    return normalized;
 }
 
 function normalizeLock(lock) {
     const parts = [];
     const selectors = { ...(lock.selectors || {}) };
+    const selectionCache = normalizeSelectionCache(lock.selectionCache || lock.selections || {});
 
     if (Array.isArray(lock.parts)) {
         for (const part of lock.parts) {
@@ -139,6 +200,7 @@ function normalizeLock(lock) {
         version: LOCK_VERSION,
         parts: uniqueParts(parts),
         selectors,
+        selectionCache,
     };
 }
 
@@ -155,6 +217,7 @@ function normalizeSelectedPart(part) {
     }
     return {
         lcsc: String(part.lcsc || part.LCSC || "").toUpperCase(),
+        partName: part.partName || part.part_name,
         manufacturer: part.manufacturer || part.manufacture,
         mpn: part.mpn || part.partNumber,
         package: part.package || part.footprint,
@@ -190,6 +253,38 @@ function findLockedPart(lock, component) {
     return normalizedLock.parts.find((part) => part.lcsc === String(lcsc).toUpperCase()) || { lcsc };
 }
 
+function findPartByLcsc(lock, lcsc) {
+    const normalizedLock = normalizeLock(lock);
+    const upper = String(lcsc || "").toUpperCase();
+    if (!upper) {
+        return undefined;
+    }
+
+    return normalizedLock.parts.find((part) => part.lcsc === upper) || { lcsc: upper };
+}
+
+function findCachedSelection(lock, component) {
+    const normalizedLock = normalizeLock(lock);
+    const cached = normalizedLock.selectionCache[componentSelectionKey(component)];
+    if (!cached) {
+        return undefined;
+    }
+
+    if (typeof cached === "string") {
+        return normalizedLock.parts.find((part) => part.lcsc === cached.toUpperCase()) || { lcsc: cached };
+    }
+
+    const lcsc = String(cached.lcsc || cached.LCSC || "").toUpperCase();
+    if (!lcsc) {
+        return undefined;
+    }
+
+    return normalizedLock.parts.find((part) => part.lcsc === lcsc) || {
+        lcsc,
+        partName: cached.partName || cached.part_name,
+    };
+}
+
 function rankedParts(parts) {
     const remaining = [...parts].map(normalizeSelectedPart).filter((part) => part && part.lcsc);
     const ranked = [];
@@ -210,6 +305,16 @@ function importedAssetsExist(importResult) {
 
     return fs.existsSync(path.join(importResult.directory, `${importResult.partName}.kicad_sym`))
         && fs.existsSync(path.join(importResult.directory, `${importResult.partName}.kicad_mod`));
+}
+
+function installedAssetsExist(partsDir, part) {
+    if (!part || !part.lcsc || !part.partName) {
+        return false;
+    }
+
+    const directory = path.join(partsDir, part.partName);
+    return fs.existsSync(path.join(directory, `${part.partName}.kicad_sym`))
+        && fs.existsSync(path.join(directory, `${part.partName}.kicad_mod`));
 }
 
 async function importSelectedPart(part, filePath, partsDir, options) {
@@ -251,7 +356,7 @@ function initialSelectionCandidates(component, lock, noPartsLock) {
     if (component.info && component.info.LCSC) {
         return {
             explicit: true,
-            parts: [normalizeSelectedPart({
+            parts: [normalizeSelectedPart(findPartByLcsc(lock, component.info.LCSC) || {
                 lcsc: component.info.LCSC,
                 manufacturer: component.info.manufacture,
                 mpn: component.info.partNumber,
@@ -261,9 +366,10 @@ function initialSelectionCandidates(component, lock, noPartsLock) {
     }
 
     const lockedPart = noPartsLock ? undefined : findLockedPart(lock, component);
+    const cachedPart = noPartsLock || lockedPart ? undefined : findCachedSelection(lock, component);
     return {
         explicit: false,
-        parts: lockedPart ? [normalizeSelectedPart(lockedPart)] : [],
+        parts: lockedPart ? [normalizeSelectedPart(lockedPart)] : cachedPart ? [normalizeSelectedPart(cachedPart)] : [],
     };
 }
 
@@ -286,13 +392,35 @@ async function resolveGenericParts(filePath, compiled, options = {}) {
     const lock = noPartsLock ? { version: LOCK_VERSION, parts: [], selectors: {} } : normalizeLock(readPartsLock(filePath));
     const selectedParts = [...lock.parts];
     const selectors = {};
+    const selectionCache = { ...(lock.selectionCache || {}) };
     const partsDir = path.join(path.dirname(filePath), "parts", "autogenerated");
     const genericComponents = compiled.components.filter(isGenericComponent);
     options.onProgress && options.onProgress({ current: 0, total: genericComponents.length });
 
+    function persistLock() {
+        if (noPartsLock) {
+            return;
+        }
+
+        lock.parts = uniqueParts(selectedParts);
+        lock.selectors = Object.fromEntries(
+            Object.entries(selectors).sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
+        );
+        lock.selectionCache = Object.fromEntries(
+            Object.entries(selectionCache).sort(([left], [right]) => left.localeCompare(right))
+        );
+        writePartsLock(filePath, {
+            version: LOCK_VERSION,
+            parts: lock.parts,
+            selectors: lock.selectors,
+            selectionCache: lock.selectionCache,
+        });
+    }
+
     for (let index = 0; index < genericComponents.length; index++) {
         const component = genericComponents[index];
         options.onProgress && options.onProgress({ current: index, total: genericComponents.length, component });
+        const selectionKey = componentSelectionKey(component);
 
         const candidates = initialSelectionCandidates(component, lock, noPartsLock);
         let selectedPart;
@@ -303,8 +431,16 @@ async function resolveGenericParts(filePath, compiled, options = {}) {
                     continue;
                 }
 
+                if (installedAssetsExist(partsDir, candidate)) {
+                    return candidate;
+                }
+
                 const imported = await importSelectedPart(candidate, filePath, partsDir, options);
                 if (imported.ok) {
+                    if (imported.result) {
+                        candidate.partName = imported.result.partName;
+                        candidate.directory = imported.result.directory;
+                    }
                     return candidate;
                 }
 
@@ -331,6 +467,11 @@ async function resolveGenericParts(filePath, compiled, options = {}) {
         applyPartToComponent(component, selectedPart);
         selectedParts.push(selectedPart);
         selectors[component.designator] = selectedPart.lcsc;
+        selectionCache[selectionKey] = {
+            lcsc: selectedPart.lcsc,
+            partName: selectedPart.partName,
+        };
+        persistLock();
         options.onProgress && options.onProgress({ current: index + 1, total: genericComponents.length, component });
     }
 
@@ -339,6 +480,9 @@ async function resolveGenericParts(filePath, compiled, options = {}) {
         parts: uniqueParts(selectedParts),
         selectors: Object.fromEntries(
             Object.entries(selectors).sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
+        ),
+        selectionCache: Object.fromEntries(
+            Object.entries(selectionCache).sort(([left], [right]) => left.localeCompare(right))
         ),
     };
     if (!noPartsLock) {
