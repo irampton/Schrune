@@ -1,6 +1,6 @@
 class BasicComponent {
     constructor(params = {}, options) {
-        if (!("value" in params)) {
+        if (!("value" in params) && !("LCSC" in params) && !("lcsc" in params)) {
             throw new Error(`${options.partNumber} requires a value`);
         }
 

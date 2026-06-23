@@ -700,7 +700,7 @@ function createPrimitiveTemplates() {
 }
 
 function createComponent(template, params = {}) {
-    if (template.primitive && !("value" in params) && !("LCSC" in params)) {
+    if (template.primitive && !("value" in params) && !("LCSC" in params) && !("lcsc" in params)) {
         throw new Error(`${template.name} requires a value or LCSC part`);
     }
     const footprint = params.footprint;
@@ -711,7 +711,7 @@ function createComponent(template, params = {}) {
                 this.info = {
                     ...template.info,
                     footprint: footprint || template.info.footprint,
-                    LCSC: params.LCSC || template.info.LCSC,
+                    LCSC: params.LCSC || params.lcsc || template.info.LCSC,
                 };
                 this.pins = [];
                 if (template.primitive) {
@@ -2521,12 +2521,12 @@ function renderStatement(statement, indent = 4, context = { netNames: new Set(),
 
     const arrayPartMatch = statement.match(/^part\[(\d+)\]\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
     if (arrayPartMatch) {
-        return [`${padding}const ${arrayPartMatch[2]} = __componentArray(${arrayPartMatch[1]}, () => ${renderComponentConstructor(arrayPartMatch[3], arrayPartMatch[4])});`];
+        return [`${padding}const ${arrayPartMatch[2]} = __componentArray(${jsString(arrayPartMatch[2])}, ${arrayPartMatch[1]}, () => ${renderComponentConstructor(arrayPartMatch[3], arrayPartMatch[4])});`];
     }
 
     const partMatch = statement.match(/^(?:part\s+)?([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)(?:\s*\(([\s\S]*)\))?$/);
     if (partMatch) {
-        return [`${padding}const ${partMatch[1]} = __component(() => ${renderComponentConstructor(partMatch[2], partMatch[3] || "")});`];
+        return [`${padding}const ${partMatch[1]} = __component(${jsString(partMatch[1])}, () => ${renderComponentConstructor(partMatch[2], partMatch[3] || "")});`];
     }
 
     const moduleMatch = statement.match(/^mod\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
@@ -2603,6 +2603,7 @@ function renderRuntimeHelpers() {
         `    const netAliases = new Map();\n` +
         `    const pinsByKey = new Map();\n` +
         `    const scopeStack = [];\n` +
+        `    const modulePathStack = [];\n` +
         `    const netTypeSignals = ${jsString(NET_TYPE_SIGNALS)};\n` +
         `\n` +
         `    function __val(number, unit = "") {\n` +
@@ -2620,9 +2621,11 @@ function renderRuntimeHelpers() {
         `\n` +
         `    function __module(instanceName, factory) {\n` +
         `        scopeStack.push(instanceName + "_");\n` +
+        `        modulePathStack.push(instanceName);\n` +
         `        try {\n` +
         `            return factory();\n` +
         `        } finally {\n` +
+        `            modulePathStack.pop();\n` +
         `            scopeStack.pop();\n` +
         `        }\n` +
         `    }\n` +
@@ -2662,14 +2665,26 @@ function renderRuntimeHelpers() {
         `        return rail;\n` +
         `    }\n` +
         `\n` +
-        `    function __component(factory) {\n` +
+        `    function __annotateComponent(component, name, index) {\n` +
+        `        component.__schrune = {\n` +
+        `            ...(component.__schrune || {}),\n` +
+        `            name,\n` +
+        `            arrayIndex: index,\n` +
+        `            modulePath: [...modulePathStack],\n` +
+        `            moduleName: modulePathStack.join(\".\"),\n` +
+        `        };\n` +
+        `        return component;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __component(name, factory) {\n` +
         `        const component = factory();\n` +
+        `        __annotateComponent(component, name);\n` +
         `        components.push(component);\n` +
         `        return component;\n` +
         `    }\n` +
         `\n` +
-        `    function __componentArray(count, factory) {\n` +
-        `        const values = Array.from({ length: count }, () => factory());\n` +
+        `    function __componentArray(name, count, factory) {\n` +
+        `        const values = Array.from({ length: count }, (_value, index) => __annotateComponent(factory(), name, index));\n` +
         `        components.push(...values);\n` +
         `        return values;\n` +
         `    }\n` +
