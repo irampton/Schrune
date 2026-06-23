@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const { addLcscPart } = require("./lcsc");
 const { assignDesignators, step3 } = require("./bom");
 const { writeKiCadFiles } = require("./kicad");
@@ -2175,27 +2176,7 @@ function finalizeCompilation(context, topModule) {
 }
 
 function step1(filePath) {
-    const { source, modules, templates } = loadFile(filePath);
-    const topModule = modules.get("top");
-    if (!topModule) {
-        throw attachSourceLocation(new Error("No top module found"), path.resolve(filePath), source, 0);
-    }
-
-    const context = {
-        templates,
-        moduleTemplates: modules,
-        components: [],
-        pinGroups: new PinNetGroups(),
-        netScopes: [],
-        nameOverrides: new Map(),
-        netAliases: new Map(),
-    };
-    const compiledTop = compileModule(topModule, context);
-    return finalizeCompilation({
-        ...context,
-        nets: compiledTop.nets,
-        nameOverrides: context.nameOverrides,
-    }, compiledTop);
+    return executeStep1JavaScript(filePath);
 }
 
 function jsString(value) {
@@ -2355,6 +2336,22 @@ function parseNetDeclaration(statement) {
 
 function primitiveIncludeFileName(name) {
     return `${name.toLowerCase()}.js`;
+}
+
+function primitiveNamesInSource(source, includeNames = new Set()) {
+    return [...source.matchAll(/\bnew\s+([A-Za-z_]\w*)\s*\(/g)]
+        .map((match) => match[1])
+        .filter((name) => createPrimitiveTemplates().has(name) && !includeNames.has(name));
+}
+
+function primitiveNamesInModules(modules, includeNames = new Set()) {
+    const names = new Set();
+    for (const module of modules) {
+        for (const name of primitiveNamesInSource(module.body, includeNames)) {
+            names.add(name);
+        }
+    }
+    return [...names];
 }
 
 function renderConstructorArgs(args) {
@@ -2595,7 +2592,7 @@ function renderStatement(statement, indent = 4, context = { netNames: new Set(),
         ));
     }
 
-    throw new Error(`Cannot render statement "${statement}"`);
+    return [`${padding}${statement};`];
 }
 
 function renderRuntimeHelpers() {
@@ -2974,13 +2971,10 @@ function renderTopJavaScript(filePath) {
         return `const ${templateName} = require(${jsString(relativePath)});`;
     });
     const includeNames = new Set(includes.map((includePath) => path.basename(includePath, ".schrune")));
-    const primitiveNames = [...source.matchAll(/\bnew\s+([A-Za-z_]\w*)\s*\(/g)]
-        .map((match) => match[1])
-        .filter((name) => createPrimitiveTemplates().has(name) && !includeNames.has(name));
+    const primitiveNames = primitiveNamesInModules([...modules.values()], includeNames);
     const primitiveRequireLines = [...new Set(primitiveNames)].map((name) => {
         const includePath = path.join(__dirname, "include", primitiveIncludeFileName(name));
-        const relativePath = `./${path.relative(inputDir, includePath).replace(/\\/g, "/").replace(/\.js$/, "")}`;
-        return `const ${name} = require(${jsString(relativePath)});`;
+        return `const ${name} = require(${jsString(includePath)});`;
     });
     const moduleDefinitions = [...modules.values()]
         .filter((module) => module.name !== "top")
@@ -3012,22 +3006,93 @@ function renderTopJavaScript(filePath) {
     ].filter((line) => line !== undefined).join("\n");
 }
 
-function writeStep1JavaScript(filePath) {
+function renderModuleFileJavaScript(filePath) {
+    const { source, modules } = loadFile(filePath);
+    const inputDir = path.dirname(filePath);
+    const includes = includedFiles(filePath);
+    const requireLines = includes.map((includePath) => {
+        const templateName = path.basename(includePath, ".schrune");
+        const jsPath = path.join(path.dirname(includePath), `${templateName}.js`);
+        const relativePath = `./${path.relative(inputDir, jsPath).replace(/\\/g, "/").replace(/\.js$/, "")}`;
+        return `const ${templateName} = require(${jsString(relativePath)});`;
+    });
+    const includeNames = new Set(includes.map((includePath) => path.basename(includePath, ".schrune")));
+    const primitiveNames = primitiveNamesInModules([...modules.values()], includeNames);
+    const primitiveRequireLines = [...new Set(primitiveNames)].map((name) => {
+        const includePath = path.join(__dirname, "include", primitiveIncludeFileName(name));
+        return `const ${name} = require(${jsString(includePath)});`;
+    });
+    const moduleEntries = [...modules.values()];
+    if (!moduleEntries.length) {
+        throw new Error("No module found");
+    }
+
+    const exportModule = modules.get(path.basename(filePath, ".schrune")) || moduleEntries[0];
+    const helperDefinitions = moduleEntries
+        .filter((module) => module.name !== exportModule.name)
+        .map((module) => renderModuleJavaScript(module, {}));
+    const exportDefinition = renderModuleJavaScript(exportModule, {});
+
+    return [
+        ...requireLines,
+        requireLines.length && primitiveRequireLines.length ? "" : undefined,
+        ...primitiveRequireLines,
+        requireLines.length || primitiveRequireLines.length ? "" : undefined,
+        renderRuntimeHelpers().trimEnd(),
+        "",
+        ...helperDefinitions,
+        helperDefinitions.length ? "" : undefined,
+        exportDefinition,
+        "",
+        `module.exports = ${exportModule.name};`,
+        "",
+    ].filter((line) => line !== undefined).join("\n");
+}
+
+function step1OutputPath(sourceRoot, outputRoot, schrunePath) {
+    const relativePath = path.relative(sourceRoot, schrunePath).replace(/\.schrune$/, ".js");
+    return path.join(outputRoot, relativePath);
+}
+
+function materializeStep1JavaScript(filePath, outputRoot) {
     const resolvedPath = path.resolve(filePath);
+    const sourceRoot = path.dirname(resolvedPath);
     const files = [resolvedPath, ...includedFiles(resolvedPath)];
 
     for (const schrunePath of files) {
         const { source, templates } = loadFile(schrunePath);
         const partName = path.basename(schrunePath, ".schrune");
         const partTemplate = templates.get(partName);
-        const outputPath = path.join(path.dirname(schrunePath), `${partName}.js`);
+        const outputPath = step1OutputPath(sourceRoot, outputRoot, schrunePath);
+        fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
         if (partTemplate && !extractBlocks(source, "module", { allowParameters: true }).some((module) => module.name === "top")) {
             fs.writeFileSync(outputPath, renderPartJavaScript(partTemplate));
             continue;
         }
 
-        fs.writeFileSync(outputPath, renderTopJavaScript(schrunePath));
+        if (extractBlocks(source, "module", { allowParameters: true }).some((module) => module.name === "top")) {
+            fs.writeFileSync(outputPath, renderTopJavaScript(schrunePath));
+            continue;
+        }
+
+        fs.writeFileSync(outputPath, renderModuleFileJavaScript(schrunePath));
+    }
+}
+
+function executeStep1JavaScript(filePath) {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-step1-"));
+    try {
+        materializeStep1JavaScript(filePath, tempRoot);
+        const entryPoint = step1OutputPath(path.dirname(path.resolve(filePath)), tempRoot, path.resolve(filePath));
+        delete require.cache[require.resolve(entryPoint)];
+        const top = require(entryPoint);
+        if (typeof top !== "function") {
+            throw new Error("Step 1 entrypoint did not export a function");
+        }
+        return top();
+    } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
     }
 }
 
@@ -3091,7 +3156,7 @@ async function main() {
     try {
         if (keepJs) {
             progress.start("Writing intermediate JavaScript");
-            writeStep1JavaScript(inputPath);
+            materializeStep1JavaScript(inputPath, path.dirname(inputPath));
             progress.succeed("Wrote intermediate JavaScript");
         }
 
@@ -3141,7 +3206,7 @@ module.exports = {
     step1,
     step3,
     writeKiCadFiles,
-    writeStep1JavaScript,
+    materializeStep1JavaScript,
     createProgress,
     UsageError,
     main,
