@@ -115,8 +115,25 @@ function flattenPins(value, pins = [], seen = new Set()) {
         return pins;
     }
 
-    for (const key of Object.keys(value)) {
-        flattenPins(value[key], pins, seen);
+    if (Array.isArray(value)) {
+        for (const entry of value) {
+            flattenPins(entry, pins, seen);
+        }
+        return pins;
+    }
+
+    if (typeof value === "object") {
+        if (Array.isArray(value.group)) {
+            flattenPins(value.group, pins, seen);
+            return pins;
+        }
+
+        for (const key of Object.keys(value)) {
+            const child = value[key];
+            if (child && typeof child === "object") {
+                flattenPins(child, pins, seen);
+            }
+        }
     }
 
     return pins;

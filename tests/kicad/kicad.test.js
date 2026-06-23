@@ -100,13 +100,13 @@ function makeFixture(options = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-kicad-"));
     const partsDir = path.join(dir, "parts", "TestPart");
     fs.mkdirSync(partsDir, { recursive: true });
-    fs.writeFileSync(path.join(partsDir, "TestPart.schrune"), partFile);
+    fs.writeFileSync(path.join(partsDir, "TestPart.schrune"), options.partFile || partFile);
     if (options.writeAssets !== false) {
         fs.writeFileSync(path.join(partsDir, "TestPart.kicad_sym"), symbolFile);
         fs.writeFileSync(path.join(partsDir, "TestPart.kicad_mod"), footprintFile);
     }
     const filePath = path.join(dir, "fixture.schrune");
-    fs.writeFileSync(filePath, `#include "TestPart.schrune"
+    fs.writeFileSync(filePath, options.source || `#include "TestPart.schrune"
 
 module top () {
     rail power;
@@ -158,6 +158,46 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.match(pcb, /\(net \d+ "signal"\)/);
         assert.doesNotMatch(pcb, /\(at [^)]*\(net /);
         assert.doesNotMatch(pcb, /\(fill \(type none\)\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("handles rail pin groups without recursing forever", () => {
+    const fixture = makeFixture({
+        partFile: `part TestPart {
+    info: {
+        partNumber: "TestPart",
+        manufacture: "TestCo",
+        footprint: "./TestPart.kicad_mod",
+        symbol: "./TestPart.kicad_sym",
+        designatorPrefix: "U",
+    }
+
+    pins: [
+        rail VBUS: {
+            h: A1~A2,
+            l: B1~B2,
+        },
+        IN:1,
+    ]
+}
+`,
+        source: `#include "TestPart.schrune"
+
+module top () {
+    rail power;
+    part u = new TestPart();
+    u.VBUS ~ power;
+}
+`,
+    });
+
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled);
+        assert.equal(fs.existsSync(result.schematicPath), true);
+        assert.equal(fs.existsSync(result.pcbPath), true);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
