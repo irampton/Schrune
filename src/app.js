@@ -285,6 +285,29 @@ function parsePinEntries(body) {
     const pins = [];
 
     for (const entry of splitTopLevelEntries(body)) {
+        const railMatch = entry.match(/^rail\s+([A-Za-z_]\w*)\s*:\s*\{([\s\S]*)\}$/);
+        if (railMatch) {
+            pins.push({
+                name: railMatch[1],
+                group: parsePinObjectEntries(railMatch[2], ["h", "l"]),
+                objectGroup: true,
+                rail: true,
+            });
+            continue;
+        }
+
+        const netGroupMatch = entry.match(/^net<([A-Za-z_]\w*)>\s+([A-Za-z_]\w*)\s*:\s*\{([\s\S]*)\}$/);
+        if (netGroupMatch) {
+            const type = normalizeNetType(netGroupMatch[1]);
+            pins.push({
+                name: netGroupMatch[2],
+                group: parsePinObjectEntries(netGroupMatch[3], netTypeSignals(type)),
+                objectGroup: true,
+                netGroupType: type,
+            });
+            continue;
+        }
+
         const nestedMatch = entry.match(/^([A-Za-z_]\w*)\s*:\s*\[([\s\S]*)\]$/);
         if (nestedMatch) {
             pins.push({
@@ -294,17 +317,56 @@ function parsePinEntries(body) {
             continue;
         }
 
-        const match = entry.match(/^([A-Za-z_]\w*|\d+)\s*:\s*(\d+)$/);
+        const match = entry.match(/^([A-Za-z_]\w*|\d+)\s*:\s*([A-Za-z0-9_]+(?:\s*~\s*[A-Za-z0-9_]+)*)$/);
         if (!match) {
             throw new Error(`Invalid pin entry "${entry}"`);
         }
-        pins.push({
-            name: match[1],
-            pad: Number(match[2]),
-        });
+        pins.push(parsePinEntry(match[1], match[2]));
     }
 
     return pins;
+}
+
+function parsePinObjectEntries(body, requiredNames = []) {
+    const entries = new Map();
+    for (const entry of splitTopLevelEntries(body)) {
+        const match = entry.match(/^([A-Za-z_]\w*)\s*:\s*([A-Za-z0-9_]+(?:\s*~\s*[A-Za-z0-9_]+)*)$/);
+        if (!match) {
+            throw new Error(`Invalid pin group entry "${entry}"`);
+        }
+        entries.set(match[1], parsePinEntry(match[1], match[2]));
+    }
+
+    for (const name of requiredNames) {
+        if (!entries.has(name)) {
+            throw new Error(`Pin group is missing "${name}"`);
+        }
+    }
+
+    return [...entries.values()];
+}
+
+function parsePadValue(value) {
+    const trimmed = value.trim();
+    return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
+}
+
+function parsePinEntry(name, pads) {
+    const padValues = pads.split("~").map(parsePadValue);
+    if (padValues.length === 1) {
+        return {
+            name,
+            pad: padValues[0],
+        };
+    }
+
+    return {
+        name,
+        group: padValues.map((pad) => ({
+            name: String(pad),
+            pad,
+        })),
+    };
 }
 
 function parseConstructorArgs(args) {
@@ -515,8 +577,15 @@ function annotateComponent(component, name, index, modulePath = []) {
 function addPins(target, pins, indexed = false) {
     for (const pin of pins) {
         if (pin.group) {
-            const group = [];
-            addPins(group, pin.group, true);
+            const group = pin.objectGroup ? {} : [];
+            if (pin.rail) {
+                group.__pinRail = true;
+            }
+            if (pin.netGroupType) {
+                group.__pinNetGroup = true;
+                group.type = pin.netGroupType;
+            }
+            addPins(group, pin.group, !pin.objectGroup);
             target[pin.name] = group;
             continue;
         }
@@ -964,47 +1033,82 @@ function getPinFromPath(component, pathParts) {
     return value;
 }
 
+function parsePathParts(pathExpression, scope = {}) {
+    const parts = [];
+    let rest = pathExpression;
+
+    while (rest) {
+        if (rest[0] === ".") {
+            const match = rest.match(/^\.([A-Za-z_]\w*|\d+)/);
+            if (!match) {
+                return undefined;
+            }
+            parts.push(match[1]);
+            rest = rest.slice(match[0].length);
+            continue;
+        }
+
+        if (rest[0] === "[") {
+            const closeIndex = findMatching(rest, 0, "[", "]");
+            parts.push(evaluateIndex(rest.slice(1, closeIndex), scope));
+            rest = rest.slice(closeIndex + 1);
+            continue;
+        }
+
+        return undefined;
+    }
+
+    return parts;
+}
+
 function getPinKey(expression, scope = {}) {
     const value = expression.trim();
-    const nestedMatch = value.match(/^([A-Za-z_]\w*(?:\[[^\]]+\])?)\.([A-Za-z_]\w*)\[(.+)\]$/);
-    if (nestedMatch) {
-        const componentRef = parseComponentReference(nestedMatch[1], scope);
-        const index = evaluateIndex(nestedMatch[3], scope);
-            const componentName = componentRefName(componentRef, scope);
-        return {
-            componentRef,
-            path: [nestedMatch[2], index],
-            key: `${componentName}.${nestedMatch[2]}[${index}]`,
-            defaultNetName: `${componentName}_${nestedMatch[2]}_${index}`,
-        };
+    const nameMatch = value.match(/^([A-Za-z_]\w*)/);
+    if (!nameMatch) {
+        return undefined;
     }
 
-    const bracketMatch = value.match(/^([A-Za-z_]\w*(?:\[[^\]]+\])?)\[(.+)\]$/);
-    if (bracketMatch) {
-        const componentRef = parseComponentReference(bracketMatch[1], scope);
-        const pin = evaluateIndex(bracketMatch[2], scope);
+    const name = nameMatch[1];
+    let rest = value.slice(name.length);
+    let componentRef = { name, index: undefined };
+
+    if (rest.startsWith("[")) {
+        const closeIndex = findMatching(rest, 0, "[", "]");
+        const indexExpression = rest.slice(1, closeIndex);
+        const afterIndex = rest.slice(closeIndex + 1);
+        if (!afterIndex) {
+            const pin = evaluateIndex(indexExpression, scope);
             const componentName = componentRefName(componentRef, scope);
-        return {
-            componentRef,
-            path: [pin],
-            key: `${componentName}[${pin}]`,
-            defaultNetName: `${componentName}_${pin}`,
-        };
+            return {
+                componentRef,
+                path: [pin],
+                key: `${componentName}[${pin}]`,
+                defaultNetName: `${componentName}_${pin}`,
+            };
+        }
+
+        componentRef = { name, index: evaluateIndex(indexExpression, scope) };
+        rest = afterIndex;
     }
 
-    const dotMatch = value.match(/^([A-Za-z_]\w*(?:\[[^\]]+\])?)\.([A-Za-z_]\w*|\d+)$/);
-    if (dotMatch) {
-        const componentRef = parseComponentReference(dotMatch[1], scope);
-            const componentName = componentRefName(componentRef, scope);
-        return {
-            componentRef,
-            path: [dotMatch[2]],
-            key: `${componentName}.${dotMatch[2]}`,
-            defaultNetName: `${componentName}_${dotMatch[2]}`,
-        };
+    if (!rest) {
+        return undefined;
     }
 
-    return undefined;
+    const path = parsePathParts(rest, scope);
+    if (!path || !path.length) {
+        return undefined;
+    }
+
+    const componentName = componentRefName(componentRef, scope);
+    const suffix = path.map((part) => /^\d+$/.test(String(part)) ? `[${part}]` : `.${part}`).join("");
+    const defaultSuffix = path.map((part) => String(part)).join("_");
+    return {
+        componentRef,
+        path,
+        key: `${componentName}${suffix}`,
+        defaultNetName: `${componentName}_${defaultSuffix}`,
+    };
 }
 
 function getComponentPin(componentsByName, expression, scope = {}) {
@@ -1043,9 +1147,46 @@ function readEndpoint(expression, componentsByName, nets, scope = {}, modulesByN
     };
 }
 
+function isPinRailValue(value) {
+    return Boolean(value && typeof value === "object" && value.__pinRail);
+}
+
+function isPinNetGroupValue(value) {
+    return Boolean(value && typeof value === "object" && value.__pinNetGroup);
+}
+
 function connectEndpoints(leftExpression, rightExpression, componentsByName, nets, pinGroups, nameOverrides, scope = {}, modulesByName, netAliases) {
     const left = readEndpoint(leftExpression, componentsByName, nets, scope, modulesByName);
     const right = readEndpoint(rightExpression, componentsByName, nets, scope, modulesByName);
+
+    const leftRail = left.type === "net" ? isRailValue(left.value) : isPinRailValue(left.pin);
+    const rightRail = right.type === "net" ? isRailValue(right.value) : isPinRailValue(right.pin);
+    if (leftRail || rightRail) {
+        if (!leftRail || !rightRail) {
+            throw new Error(`Connection joins rail and net "${leftExpression} ~ ${rightExpression}"`);
+        }
+        for (const side of ["h", "l"]) {
+            connectEndpoints(`${leftExpression}.${side}`, `${rightExpression}.${side}`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
+        }
+        return;
+    }
+
+    const leftNetGroup = left.type === "net" ? isNetGroup(left.value) : isPinNetGroupValue(left.pin);
+    const rightNetGroup = right.type === "net" ? isNetGroup(right.value) : isPinNetGroupValue(right.pin);
+    if (leftNetGroup || rightNetGroup) {
+        if (!leftNetGroup || !rightNetGroup) {
+            throw new Error(`Connection joins net group and net "${leftExpression} ~ ${rightExpression}"`);
+        }
+        const leftType = left.type === "net" ? left.value.type : left.pin.type;
+        const rightType = right.type === "net" ? right.value.type : right.pin.type;
+        if (leftType !== rightType) {
+            throw new Error(`Connection joins net groups of different types "${leftType}" and "${rightType}"`);
+        }
+        for (const signalName of netTypeSignals(leftType)) {
+            connectEndpoints(`${leftExpression}.${signalName}`, `${rightExpression}.${signalName}`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
+        }
+        return;
+    }
 
     if (left.type === "pin" && right.type === "pin") {
         pinGroups.union(left, right);
@@ -1399,7 +1540,7 @@ class PinNetGroups {
         }
 
         this.explicitNets.set(root, resolvedNet);
-        pin.pin.net = resolvedNet;
+        setPinNet(pin.pin, resolvedNet);
     }
 
     groups() {
@@ -1416,6 +1557,21 @@ class PinNetGroups {
 
     pinFor(key) {
         return this.pins.get(key);
+    }
+}
+
+function setPinNet(pin, net) {
+    if (!pin || typeof pin !== "object") {
+        return;
+    }
+
+    pin.net = net;
+    if (pin.pad !== undefined && pin.name !== undefined) {
+        return;
+    }
+
+    for (const entry of Object.values(pin)) {
+        setPinNet(entry, net);
     }
 }
 
@@ -1711,7 +1867,7 @@ function finalizeCompilation(context, topModule) {
         if (explicitNet) {
             const finalExplicitNet = resolveAlias(explicitNet);
             for (const pinKey of pinKeys) {
-                pinGroups.pinFor(pinKey).net = finalExplicitNet;
+                setPinNet(pinGroups.pinFor(pinKey), finalExplicitNet);
             }
             continue;
         }
@@ -1732,7 +1888,7 @@ function finalizeCompilation(context, topModule) {
 
         implicitNets[netName] = netName;
         for (const pinKey of pinKeys) {
-            pinGroups.pinFor(pinKey).net = netName;
+            setPinNet(pinGroups.pinFor(pinKey), netName);
         }
     }
 
@@ -1828,8 +1984,15 @@ function renderPinTemplateAssignments(pins, target, indent = "        ", indexed
     for (const pin of pins) {
         if (pin.group) {
             const property = pinProperty(pin.name);
-            lines.push(`${indent}${target}${property} = [];`);
-            lines.push(...renderPinTemplateAssignments(pin.group, `${target}${property}`, indent, true));
+            lines.push(`${indent}${target}${property} = ${pin.objectGroup ? "{}" : "[]"};`);
+            if (pin.rail) {
+                lines.push(`${indent}${target}${property}.__pinRail = true;`);
+            }
+            if (pin.netGroupType) {
+                lines.push(`${indent}${target}${property}.__pinNetGroup = true;`);
+                lines.push(`${indent}${target}${property}.type = ${jsString(pin.netGroupType)};`);
+            }
+            lines.push(...renderPinTemplateAssignments(pin.group, `${target}${property}`, indent, !pin.objectGroup));
             continue;
         }
 
@@ -1971,27 +2134,73 @@ function componentReferenceParts(expression) {
     };
 }
 
+function renderPinPathParts(pathExpression) {
+    const parts = [];
+    let rest = pathExpression;
+
+    while (rest) {
+        if (rest[0] === ".") {
+            const match = rest.match(/^\.([A-Za-z_]\w*|\d+)/);
+            if (!match) {
+                return undefined;
+            }
+            parts.push(jsString(match[1]));
+            rest = rest.slice(match[0].length);
+            continue;
+        }
+
+        if (rest[0] === "[") {
+            const closeIndex = findMatching(rest, 0, "[", "]");
+            parts.push(rest.slice(1, closeIndex));
+            rest = rest.slice(closeIndex + 1);
+            continue;
+        }
+
+        return undefined;
+    }
+
+    return parts;
+}
+
 function renderPinEndpoint(expression) {
     const value = expression.trim();
-    const nestedMatch = value.match(/^([A-Za-z_]\w*(?:\[[^\]]+\])?)\.([A-Za-z_]\w*)\[(.+)\]$/);
-    if (nestedMatch) {
-        const component = componentReferenceParts(nestedMatch[1]);
-        return `__pin(${component.componentExpression}, [${jsString(nestedMatch[2])}, ${nestedMatch[3]}], ${component.componentNameExpression} + ${jsString(`_${nestedMatch[2]}_`)} + (${nestedMatch[3]}))`;
+    const nameMatch = value.match(/^([A-Za-z_]\w*)/);
+    if (!nameMatch) {
+        return undefined;
     }
 
-    const bracketMatch = value.match(/^([A-Za-z_]\w*(?:\[[^\]]+\])?)\[(.+)\]$/);
-    if (bracketMatch) {
-        const component = componentReferenceParts(bracketMatch[1]);
-        return `__pin(${component.componentExpression}, [${bracketMatch[2]}], ${component.componentNameExpression} + ${jsString("_")} + (${bracketMatch[2]}))`;
+    const name = nameMatch[1];
+    let rest = value.slice(name.length);
+    let componentExpression = name;
+    let componentNameExpression = jsString(name);
+
+    if (rest.startsWith("[")) {
+        const closeIndex = findMatching(rest, 0, "[", "]");
+        const indexExpression = rest.slice(1, closeIndex);
+        const afterIndex = rest.slice(closeIndex + 1);
+        if (!afterIndex) {
+            return `__pin(${name}, [${indexExpression}], ${jsString(`${name}_`)} + (${indexExpression}))`;
+        }
+
+        componentExpression = `${name}[${indexExpression}]`;
+        componentNameExpression = `${jsString(`${name}_`)} + (${indexExpression})`;
+        rest = afterIndex;
     }
 
-    const dotMatch = value.match(/^([A-Za-z_]\w*(?:\[[^\]]+\])?)\.([A-Za-z_]\w*|\d+)$/);
-    if (dotMatch) {
-        const component = componentReferenceParts(dotMatch[1]);
-        return `__pin(${component.componentExpression}, [${jsString(dotMatch[2])}], ${component.componentNameExpression} + ${jsString(`_${dotMatch[2]}`)})`;
+    if (!rest) {
+        return undefined;
     }
 
-    return undefined;
+    const pathParts = renderPinPathParts(rest);
+    if (!pathParts || !pathParts.length) {
+        return undefined;
+    }
+
+    const defaultNameExpression = pathParts.reduce(
+        (expression, part) => `${expression} + ${jsString("_")} + (${part})`,
+        componentNameExpression
+    );
+    return `__pin(${componentExpression}, [${pathParts.join(", ")}], ${defaultNameExpression})`;
 }
 
 function renderEndpoint(expression, context) {
@@ -2219,6 +2428,19 @@ function renderRuntimeHelpers() {
         `        return { type: "pin", pin, key: defaultNetName, defaultNetName };\n` +
         `    }\n` +
         `\n` +
+        `    function __setPinNet(pin, net) {\n` +
+        `        if (!pin || typeof pin !== "object") {\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        pin.net = net;\n` +
+        `        if (pin.pad !== undefined && pin.name !== undefined) {\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        for (const entry of Object.values(pin)) {\n` +
+        `            __setPinNet(entry, net);\n` +
+        `        }\n` +
+        `    }\n` +
+        `\n` +
         `    function __find(key) {\n` +
         `        const parent = pinGroups.get(key);\n` +
         `        if (parent === key) {\n` +
@@ -2237,6 +2459,32 @@ function renderRuntimeHelpers() {
         `    }\n` +
         `\n` +
         `    function __connect(left, right) {\n` +
+        `        const leftRail = left.type === "net" ? (!left.ref.__netRef && !left.ref.__netGroup && left.ref.h && left.ref.l) : Boolean(left.pin && left.pin.__pinRail);\n` +
+        `        const rightRail = right.type === "net" ? (!right.ref.__netRef && !right.ref.__netGroup && right.ref.h && right.ref.l) : Boolean(right.pin && right.pin.__pinRail);\n` +
+        `        if (leftRail || rightRail) {\n` +
+        `            if (!leftRail || !rightRail) {\n` +
+        `                throw new Error("Connection joins rail and net");\n` +
+        `            }\n` +
+        `            __connect(left.type === "net" ? __net(left.ref.h) : { ...left, pin: left.pin.h, key: left.defaultNetName + "_h", defaultNetName: left.defaultNetName + "_h" }, right.type === "net" ? __net(right.ref.h) : { ...right, pin: right.pin.h, key: right.defaultNetName + "_h", defaultNetName: right.defaultNetName + "_h" });\n` +
+        `            __connect(left.type === "net" ? __net(left.ref.l) : { ...left, pin: left.pin.l, key: left.defaultNetName + "_l", defaultNetName: left.defaultNetName + "_l" }, right.type === "net" ? __net(right.ref.l) : { ...right, pin: right.pin.l, key: right.defaultNetName + "_l", defaultNetName: right.defaultNetName + "_l" });\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        const leftNetGroup = left.type === "net" ? Boolean(left.ref.__netGroup) : Boolean(left.pin && left.pin.__pinNetGroup);\n` +
+        `        const rightNetGroup = right.type === "net" ? Boolean(right.ref.__netGroup) : Boolean(right.pin && right.pin.__pinNetGroup);\n` +
+        `        if (leftNetGroup || rightNetGroup) {\n` +
+        `            if (!leftNetGroup || !rightNetGroup) {\n` +
+        `                throw new Error("Connection joins net group and net");\n` +
+        `            }\n` +
+        `            const leftType = left.type === "net" ? left.ref.type : left.pin.type;\n` +
+        `            const rightType = right.type === "net" ? right.ref.type : right.pin.type;\n` +
+        `            if (leftType !== rightType) {\n` +
+        `                throw new Error(\`Connection joins net groups of different types "\${leftType}" and "\${rightType}"\`);\n` +
+        `            }\n` +
+        `            for (const signalName of netTypeSignals[leftType]) {\n` +
+        `                __connect(left.type === "net" ? __net(left.ref[signalName]) : { ...left, pin: left.pin[signalName], key: left.defaultNetName + "_" + signalName, defaultNetName: left.defaultNetName + "_" + signalName }, right.type === "net" ? __net(right.ref[signalName]) : { ...right, pin: right.pin[signalName], key: right.defaultNetName + "_" + signalName, defaultNetName: right.defaultNetName + "_" + signalName });\n` +
+        `            }\n` +
+        `            return;\n` +
+        `        }\n` +
         `        if (left.type === "net" && right.type === "net") {\n` +
         `            if (left.ref.__netGroup || right.ref.__netGroup) {\n` +
         `                if (!left.ref.__netGroup || !right.ref.__netGroup) {\n` +
@@ -2298,7 +2546,7 @@ function renderRuntimeHelpers() {
         `            throw new Error(\`Pin "\${pin.key}" connects to both "\${existing}" and "\${net}"\`);\n` +
         `        }\n` +
         `        explicitNets.set(root, net);\n` +
-        `        pin.pin.net = net;\n` +
+        `        __setPinNet(pin.pin, net);\n` +
         `    }\n` +
         `\n` +
         `    function __reserveNetName(preferred, usedNames) {\n` +
@@ -2363,7 +2611,7 @@ function renderRuntimeHelpers() {
         `            if (explicit) {\n` +
         `                const finalExplicit = resolveAlias(explicit);\n` +
         `                for (const key of keys) {\n` +
-        `                    pinsByKey.get(key).pin.net = finalExplicit;\n` +
+        `                    __setPinNet(pinsByKey.get(key).pin, finalExplicit);\n` +
         `                }\n` +
         `                continue;\n` +
         `            }\n` +
@@ -2371,7 +2619,7 @@ function renderRuntimeHelpers() {
         `            netList.add(netName);\n` +
         `            compiledNets[netName] = netName;\n` +
         `            for (const key of keys) {\n` +
-        `                pinsByKey.get(key).pin.net = netName;\n` +
+        `                __setPinNet(pinsByKey.get(key).pin, netName);\n` +
         `            }\n` +
         `        }\n` +
         `        return { netList, components, nets: compiledNets };\n` +

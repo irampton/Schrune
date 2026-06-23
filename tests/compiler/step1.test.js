@@ -100,6 +100,94 @@ module top () {
     }
 });
 
+test("connects multi-pad part pins and part rails", () => {
+    const multiPadPart = `part Connector {
+    info: {
+        partNumber: "CONN-1",
+        manufacture: "TestCo",
+        footprint: "./",
+        symbol: "./",
+        designatorPrefix: "J"
+    }
+
+    pins: [
+        SHIELD:17~18~19~20,
+        rail VBUS: {
+            h: A4B9~B4A9,
+            l: A1B12~B1A12
+        },
+        Dp:A6~B6,
+    ]
+}
+`;
+
+    const fixture = makeFixture(`#include "Connector.schrune"
+
+module top () {
+    rail power;
+    net usb_p;
+    part j1 = new Connector();
+    j1.VBUS ~ power;
+    j1.Dp ~ usb_p;
+}
+`, { "Connector.schrune": multiPadPart });
+
+    try {
+        const result = step1(fixture.filePath);
+        const pins = result.components[0].pins;
+
+        assert.equal(pins.VBUS.h[0].net, "power_h");
+        assert.equal(pins.VBUS.h[1].net, "power_h");
+        assert.equal(pins.VBUS.l[0].net, "power_l");
+        assert.equal(pins.VBUS.l[1].net, "power_l");
+        assert.equal(pins.Dp[0].net, "usb_p");
+        assert.equal(pins.Dp[1].net, "usb_p");
+        assert.equal(pins.Dp.net, "usb_p");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("connects typed net groups declared in part pins", () => {
+    const groupedPart = `part Sensor {
+    info: {
+        partNumber: "SENS-1",
+        manufacture: "TestCo",
+        footprint: "./",
+        symbol: "./",
+        designatorPrefix: "U"
+    }
+
+    pins: [
+        net<i2c> bus: {
+            SDA: 1~3,
+            SCL: 2
+        },
+    ]
+}
+`;
+
+    const fixture = makeFixture(`#include "Sensor.schrune"
+
+module top () {
+    net<i2c> i2c_bus;
+    part sensor = new Sensor();
+    sensor.bus ~ i2c_bus;
+}
+`, { "Sensor.schrune": groupedPart });
+
+    try {
+        const result = step1(fixture.filePath);
+        const pins = result.components[0].pins;
+
+        assert.equal(pins.bus.SDA[0].net, "i2c_bus.SDA");
+        assert.equal(pins.bus.SDA[1].net, "i2c_bus.SDA");
+        assert.equal(pins.bus.SCL.net, "i2c_bus.SCL");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("rejects #import", () => {
     withFixture(`#import "TestPart.schrune"
 

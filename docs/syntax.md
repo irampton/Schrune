@@ -176,6 +176,8 @@ Common fields are:
 * `designatorPrefix`
 
 `pins` maps logical pin names to physical pad numbers. Numeric-only pin names are preserved as pads, and grouped pins are supported with nested arrays.
+Use `~` between pad numbers when one logical pin/net is backed by multiple physical pads.
+Part pins can also expose rails or typed net groups with object syntax.
 
 ```schrune
 part Example {
@@ -189,9 +191,18 @@ part Example {
     pins: [
         1:1,
         2:2,
+        GND:3~4,
+        rail VBUS: {
+            h: A4~B4,
+            l: A1~B1,
+        },
+        net<i2c> control: {
+            SDA: 5,
+            SCL: 6,
+        },
         inputs: [
-            A:3,
-            B:4,
+            A:7,
+            B:8,
         ],
     ]
 }

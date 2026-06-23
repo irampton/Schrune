@@ -112,6 +112,56 @@ module top () {
     }
 });
 
+test("kept part JavaScript preserves multi-pad pins and part rails", () => {
+    const connectorPart = `part Connector {
+    info: {
+        partNumber: "CONN-1",
+        manufacture: "TestCo",
+        footprint: "./",
+        symbol: "./",
+        designatorPrefix: "J"
+    }
+
+    pins: [
+        rail VBUS: {
+            h: A4B9~B4A9,
+            l: A1B12~B1A12
+        },
+        Dp:A6~B6,
+    ]
+}
+`;
+    const fixture = makeFixture(`#include "Connector.schrune"
+
+module top () {
+    rail power;
+    net usb_p;
+    part j1 = new Connector();
+    j1.VBUS ~ power;
+    j1.Dp ~ usb_p;
+}
+`, { "Connector.schrune": connectorPart });
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+        const pins = result.components[0].pins;
+
+        assert.equal(pins.VBUS.h[0].net, "power_h");
+        assert.equal(pins.VBUS.h[1].net, "power_h");
+        assert.equal(pins.VBUS.l[0].net, "power_l");
+        assert.equal(pins.VBUS.l[1].net, "power_l");
+        assert.equal(pins.Dp[0].net, "usb_p");
+        assert.equal(pins.Dp[1].net, "usb_p");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("kept Step 1 JavaScript preserves loops and branches at runtime", () => {
     const fixture = makeFixture(`#include "TestPart.schrune"
 
