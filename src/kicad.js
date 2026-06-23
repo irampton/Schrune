@@ -164,16 +164,95 @@ function findMatching(source, openIndex) {
     throw new Error("Unbalanced KiCad S-expression");
 }
 
+function readExpressionName(source, openIndex) {
+    let index = openIndex + 1;
+    while (index < source.length && /\s/.test(source[index])) {
+        index++;
+    }
+
+    let name = "";
+    while (index < source.length) {
+        const char = source[index];
+        if (/\s|\(|\)/.test(char)) {
+            break;
+        }
+        name += char;
+        index++;
+    }
+
+    return name;
+}
+
+function findChildExpression(source, parentOpenIndex, childName) {
+    const parentCloseIndex = findMatching(source, parentOpenIndex);
+    let inString = false;
+    let escaped = false;
+
+    for (let i = parentOpenIndex + 1; i < parentCloseIndex; i++) {
+        const char = source[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (char === "\\") {
+                escaped = true;
+            } else if (char === "\"") {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === "\"") {
+            inString = true;
+            continue;
+        }
+
+        if (char === "(") {
+            const name = readExpressionName(source, i);
+            if (name === childName) {
+                return {
+                    openIndex: i,
+                    closeIndex: findMatching(source, i),
+                };
+            }
+            i = findMatching(source, i);
+        }
+    }
+
+    return undefined;
+}
+
 function extractSymbol(symbolText) {
-    const match = symbolText.match(/\n\s+\(symbol\s+"([^"]+)"/);
-    if (!match) {
+    const libraryOpenIndex = symbolText.indexOf("(kicad_symbol_lib");
+    if (libraryOpenIndex !== -1) {
+        const symbolBlock = findChildExpression(symbolText, libraryOpenIndex, "symbol");
+        if (!symbolBlock) {
+            throw new Error("KiCad symbol file does not contain a symbol");
+        }
+
+        const nameMatch = symbolText.slice(symbolBlock.openIndex, symbolBlock.closeIndex + 1)
+            .match(/^\(symbol\s+"([^"]+)"/);
+        if (!nameMatch) {
+            throw new Error("KiCad symbol file does not contain a symbol");
+        }
+
+        return {
+            name: nameMatch[1],
+            source: symbolText.slice(symbolBlock.openIndex, symbolBlock.closeIndex + 1),
+        };
+    }
+
+    const openIndex = symbolText.indexOf("(symbol");
+    if (openIndex === -1) {
         throw new Error("KiCad symbol file does not contain a symbol");
     }
 
-    const openIndex = symbolText.indexOf("(symbol", match.index);
     const closeIndex = findMatching(symbolText, openIndex);
+    const nameMatch = symbolText.slice(openIndex, closeIndex + 1).match(/^\(symbol\s+"([^"]+)"/);
+    if (!nameMatch) {
+        throw new Error("KiCad symbol file does not contain a symbol");
+    }
     return {
-        name: match[1],
+        name: nameMatch[1],
         source: symbolText.slice(openIndex, closeIndex + 1),
     };
 }
@@ -224,7 +303,11 @@ function componentPlacement(compiled) {
 
     for (const component of compiled.components) {
         const pair = passiveNetPair(component);
-        const key = pair && /^[RCLD]/.test(component.designator) ? `passive:${pair}` : `component:${component.designator}`;
+        const moduleName = component.__schrune && component.__schrune.moduleName || "";
+        const moduleKey = moduleName || "__top__";
+        const key = pair && /^[RCLD]/.test(component.designator)
+            ? `module:${moduleKey}:passive:${pair}`
+            : `module:${moduleKey}:component:${component.designator}`;
         if (!groups.has(key)) {
             groups.set(key, []);
             order.push(key);
@@ -391,27 +474,46 @@ function renderSchematicSymbol(component, symbol, placement, projectName) {
     ].join("\n");
 }
 
-function renderNetConnection(projectName, component, netName, point, pin) {
+function renderNetConnection(projectName, component, netName, point, pin, options = {}) {
     const end = labelEnd(point, pin);
     const label = labelPoint(point, end);
     const seed = `${projectName}:${component.designator}:${pin.number}:${netName}`;
+    const labelToken = options.globalLabels ? "global_label" : "label";
+    const labelShape = labelToken === "global_label" ? " (shape input)" : "";
     return [
         `  (wire (pts (xy ${point.x.toFixed(2)} ${point.y.toFixed(2)}) (xy ${end.x.toFixed(2)} ${end.y.toFixed(2)}))`,
         `    (stroke (width 0) (type default))`,
         `    (uuid ${kicadId(`${seed}:wire`)})`,
         `  )`,
-        `  (label ${kicadString(netName)} (at ${label.x.toFixed(2)} ${label.y.toFixed(2)} ${labelAngle(pin)})`,
+        `  (${labelToken} ${kicadString(netName)}${labelShape} (at ${label.x.toFixed(2)} ${label.y.toFixed(2)} ${labelAngle(pin)})`,
         `    (effects (font (size 1.27 1.27)))`,
         `    (uuid ${kicadId(`${seed}:label`)})`,
         `  )`,
     ].join("\n");
 }
 
-function renderSchematic(filePath, compiled, assets, placements) {
+function renderSheetEntry(projectName, sheetName, sheetFile, x, y) {
+    return [
+        `  (sheet (at ${x.toFixed(2)} ${y.toFixed(2)}) (size 30.48 15.24)`,
+        `    (stroke (width 0.1524) (type solid))`,
+        `    (fill (color 0 0 0 0.0000))`,
+        `    (uuid ${kicadId(`${projectName}:sheet:${sheetName}`)})`,
+        `    (property "Sheetname" ${kicadString(sheetName)} (at ${x.toFixed(2)} ${(y - 1.27).toFixed(2)} 0)`,
+        `      (effects (font (size 1.27 1.27)) (justify left bottom))`,
+        `    )`,
+        `    (property "Sheetfile" ${kicadString(sheetFile)} (at ${x.toFixed(2)} ${(y + 16.51).toFixed(2)} 0)`,
+        `      (effects (font (size 1.27 1.27)) (justify left top))`,
+        `    )`,
+        `  )`,
+    ].join("\n");
+}
+
+function renderSchematic(filePath, compiled, assets, placements, options = {}) {
     const projectName = path.basename(filePath, ".schrune");
     const symbols = new Map();
     const instances = [];
     const connections = [];
+    const sheetEntries = options.sheetEntries || [];
 
     for (const component of compiled.components) {
         const asset = assets.get(component);
@@ -433,7 +535,7 @@ function renderSchematic(filePath, compiled, assets, placements) {
             connections.push(renderNetConnection(projectName, component, pin.net, point, {
                 ...symbolPin,
                 number: padNumber,
-            }));
+            }, options));
         }
     }
 
@@ -444,6 +546,7 @@ function renderSchematic(filePath, compiled, assets, placements) {
         renderLibSymbols(symbols),
         ...instances,
         ...connections,
+        ...sheetEntries,
         `  (sheet_instances`,
         `    (path "/"`,
         `      (page "1")`,
@@ -639,10 +742,54 @@ function writeKiCadFiles(filePath, compiled) {
     const pcbPath = path.join(outputDir, `${projectName}.kicad_pcb`);
     const assets = collectAssets(filePath, compiled);
     const placements = componentPlacement(compiled);
+    const moduleGroups = new Map();
+    for (const component of compiled.components) {
+        const moduleName = component.__schrune && component.__schrune.moduleName;
+        if (moduleName) {
+            if (!moduleGroups.has(moduleName)) {
+                moduleGroups.set(moduleName, []);
+            }
+            moduleGroups.get(moduleName).push(component);
+        }
+    }
+    const hasModuleSheets = moduleGroups.size > 0;
+    const rootComponents = hasModuleSheets
+        ? compiled.components.filter((component) => !(component.__schrune && component.__schrune.moduleName))
+        : compiled.components;
+    const sheetEntries = [...moduleGroups.keys()].map((moduleName, index) => ({
+        name: moduleName,
+        file: `${projectName}_${sanitizeIdentifier(moduleName)}.kicad_sch`,
+        x: START_X,
+        y: START_Y + index * 22.86,
+    }));
+    const moduleSchematicPaths = {};
 
     fs.mkdirSync(outputDir, { recursive: true });
     fs.writeFileSync(projectPath, renderProject(projectName));
-    fs.writeFileSync(schematicPath, renderSchematic(filePath, compiled, assets, placements));
+    fs.writeFileSync(schematicPath, renderSchematic(
+        filePath,
+        { ...compiled, components: rootComponents },
+        assets,
+        placements,
+        {
+            globalLabels: hasModuleSheets,
+            sheetEntries: sheetEntries.map((entry) => renderSheetEntry(projectName, entry.name, entry.file, entry.x, entry.y)),
+        }
+    ));
+
+    for (const entry of sheetEntries) {
+        const moduleComponents = moduleGroups.get(entry.name);
+        const modulePath = path.join(outputDir, entry.file);
+        fs.writeFileSync(modulePath, renderSchematic(
+            filePath,
+            { ...compiled, components: moduleComponents },
+            assets,
+            placements,
+            { globalLabels: true }
+        ));
+        moduleSchematicPaths[entry.name] = modulePath;
+    }
+
     fs.writeFileSync(pcbPath, renderPcb(filePath, compiled, assets, placements));
 
     return {
@@ -650,6 +797,7 @@ function writeKiCadFiles(filePath, compiled) {
         kicadDir: outputDir,
         kicadProjectPath: projectPath,
         schematicPath,
+        moduleSchematicPaths,
         pcbPath,
     };
 }

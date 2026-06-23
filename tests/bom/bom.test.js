@@ -183,6 +183,96 @@ test("step3 can skip parts-lock writes", async () => {
     }
 });
 
+test("step3 honors LCSC-selected generic primitives without searching JLC", async () => {
+    const fixture = makeFixture(`module top () {
+    part d1 = new Diode(LCSC="C8678");
+}
+`);
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = await step3(fixture.filePath, compiled, {
+            downloadParts: false,
+            selectPart: async () => {
+                throw new Error("should not search");
+            },
+        });
+
+        assert.equal(result.components[0].selectedPart.lcsc, "C8678");
+        assert.equal(result.partsLock.selectors.D1, "C8678");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("step3 reselects auto-selected parts when imported KiCad assets are missing", async () => {
+    const { fixture, compiled } = compile(`module top () {
+    c1 = new Capacitor(value = "100nF", footprint = "0402");
+}
+`);
+
+    try {
+        const imported = [];
+        const result = await step3(fixture.filePath, compiled, {
+            selectParts: async () => [{
+                lcsc: "C_BAD",
+                manufacturer: "Bad",
+                mpn: "NO_ASSETS",
+                package: "0402",
+            }, {
+                lcsc: "C_GOOD",
+                manufacturer: "Good",
+                mpn: "HAS_ASSETS",
+                package: "0402",
+            }],
+            addLcscPart: async (lcsc, options) => {
+                imported.push(lcsc);
+                const partName = lcsc;
+                const directory = path.join(options.partsDir, partName);
+                fs.mkdirSync(directory, { recursive: true });
+                if (lcsc === "C_GOOD") {
+                    fs.writeFileSync(path.join(directory, `${partName}.kicad_sym`), "");
+                    fs.writeFileSync(path.join(directory, `${partName}.kicad_mod`), "");
+                }
+                return { partName, directory };
+            },
+        });
+
+        assert.deepEqual(imported, ["C_BAD", "C_GOOD"]);
+        assert.equal(result.components[0].info.LCSC, "C_GOOD");
+        assert.equal(result.partsLock.selectors.C1, "C_GOOD");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("step3 reports generic component fetch progress", async () => {
+    const { fixture, compiled } = compile(`module top () {
+    c1 = new Capacitor(value = "100nF", footprint = "0402");
+    r1 = new Resistor(value = "10k", footprint = "0603");
+}
+`);
+
+    try {
+        const progress = [];
+        await step3(fixture.filePath, compiled, {
+            downloadParts: false,
+            selectPart: async (component) => ({
+                lcsc: component.designator === "C1" ? "C1525" : "C25804",
+                manufacturer: "Test",
+                mpn: component.designator,
+                package: "0603",
+            }),
+            onProgress: ({ current, total }) => {
+                progress.push(`${current}/${total}`);
+            },
+        });
+
+        assert.deepEqual(progress, ["0/2", "0/2", "1/2", "1/2", "2/2"]);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("readPartsLock returns an empty normalized lock when none exists", () => {
     const fixture = makeFixture("module top () {}\n");
     try {

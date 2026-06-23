@@ -282,6 +282,17 @@ module top () {
     });
 });
 
+test("allows LCSC-selected primitive components without a value", () => {
+    withFixture(`module top () {
+    part d1 = new Diode(LCSC="C8678");
+}
+`, (filePath) => {
+        const result = step1(filePath);
+
+        assert.equal(result.components[0].info.LCSC, "C8678");
+    });
+});
+
 test("connects bridge operator edges through a two-pin component", () => {
     withFixture(`#include "TestPart.schrune"
 
@@ -387,5 +398,71 @@ module top () {
         const result = step1(filePath);
         assert.deepEqual([...result.netList], ["signal"]);
         assert.equal(result.components[0].pins.IN.net, "signal");
+    });
+});
+
+test("instantiates hierarchical modules and connects exported nets", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module child () {
+    rail v;
+    net signal;
+    part u = new TestPart();
+    u.IN ~ signal;
+    u.OUT ~ v.l;
+}
+
+module top () {
+    rail power;
+    net gpio;
+    mod c = new child();
+    c.v ~ power;
+    c.signal ~ gpio;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+
+        assert.deepEqual([...result.netList].sort(), ["gpio", "power_h", "power_l"].sort());
+        assert.equal(result.components.length, 1);
+        assert.equal(result.components[0].pins.IN.net, "gpio");
+        assert.equal(result.components[0].pins.OUT.net, "power_l");
+        assert.deepEqual(result.components[0].__schrune.modulePath, ["c"]);
+    });
+});
+
+test("evaluates val declarations in constructor expressions", () => {
+    withFixture(`module top () {
+    val feedback_r1 = 10kOhm;
+    part r1 = new Resistor(value=feedback_r1 / 2, footprint="0603");
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        const resistor = result.components[0];
+
+        assert.equal(resistor.value, 5000);
+        assert.equal(resistor.footprint, "0603");
+    });
+});
+
+test("expands typed net groups across whole-bus and signal connections", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module top () {
+    net<i2c> bus_1;
+    net<i2c> bus_2;
+    part left = new TestPart();
+    part right = new TestPart();
+    bus_1 ~ bus_2;
+    left[1] ~ bus_1.SDA;
+    right[1] ~ bus_1.SCL;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+
+        assert.deepEqual([...result.netList].sort(), ["bus_2.SDA", "bus_2.SCL"].sort());
+        assert.deepEqual(result.nets.bus_1, { type: "i2c", SDA: "bus_2.SDA", SCL: "bus_2.SCL" });
+        assert.deepEqual(result.nets.bus_2, { type: "i2c", SDA: "bus_2.SDA", SCL: "bus_2.SCL" });
+        assert.equal(result.components[0].pins[1].net, "bus_2.SDA");
+        assert.equal(result.components[1].pins[1].net, "bus_2.SCL");
     });
 });

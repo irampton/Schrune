@@ -49,6 +49,14 @@ function createProgress(stream = process.stderr) {
                 render(frames[index]);
             }, 80);
         },
+        update(nextMessage) {
+            message = nextMessage;
+            if (!enabled) {
+                stream.write(`${message}...\n`);
+                return;
+            }
+            render(frames[index]);
+        },
         succeed(nextMessage = message) {
             stopTimer();
             if (!enabled) {
@@ -113,7 +121,7 @@ function findMatching(source, openIndex, openChar, closeChar) {
 
 function extractBlocks(source, keyword, options = {}) {
     const blocks = [];
-    const parameters = options.allowParameters ? "\\s*(?:\\([^)]*\\))?" : "";
+    const parameters = options.allowParameters ? "\\s*(\\([^)]*\\))?" : "";
     const pattern = new RegExp(`\\b${keyword}\\s+([A-Za-z_]\\w*)${parameters}\\s*\\{`, "g");
     let match;
 
@@ -122,6 +130,7 @@ function extractBlocks(source, keyword, options = {}) {
         const closeIndex = findMatching(source, openIndex, "{", "}");
         blocks.push({
             name: match[1],
+            parameters: match[2] ? match[2].slice(1, -1).trim() : "",
             body: source.slice(openIndex + 1, closeIndex),
         });
         pattern.lastIndex = closeIndex + 1;
@@ -178,10 +187,13 @@ function splitStatements(body) {
 function isCompleteLineStatement(statement) {
     return [
         /^(net|rail)\s+[A-Za-z_]\w*$/,
+        /^val\s+[A-Za-z_]\w*\s*=\s*.+$/,
         /^.+?\.name\s*=\s*.+$/,
         /^[A-Za-z_]\w*\.voltage\s*=\s*.+$/,
         /^(?:part\s+)?[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*\s*\([\s\S]*\)$/,
+        /^(?:part\s+)?[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*$/,
         /^part\[\d+\]\s+[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*\s*\([\s\S]*\)$/,
+        /^mod\s+[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*\s*\([\s\S]*\)$/,
         /^.+?\s*~\s*.+$/,
         /^.+?\s*~>\s*.+$/,
         /^for\s*\(/,
@@ -334,6 +346,52 @@ function parseConstructorArgs(args) {
     return params;
 }
 
+function parseConstructorArgExpressions(args) {
+    const params = {};
+    let start = 0;
+    let depth = 0;
+    let inString = false;
+    let stringChar = "";
+
+    for (let i = 0; i <= args.length; i++) {
+        const char = args[i];
+        const prev = args[i - 1];
+
+        if (inString) {
+            if (char === stringChar && prev !== "\\") {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === "\"" || char === "'") {
+            inString = true;
+            stringChar = char;
+            continue;
+        }
+
+        if (char === "(" || char === "[" || char === "{") {
+            depth++;
+        } else if (char === ")" || char === "]" || char === "}") {
+            depth--;
+        }
+
+        if ((char === "," || i === args.length) && depth === 0) {
+            const pair = args.slice(start, i).trim();
+            if (pair) {
+                const match = pair.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+                if (!match) {
+                    throw new Error(`Invalid constructor parameter "${pair}"`);
+                }
+                params[match[1]] = match[2].trim();
+            }
+            start = i + 1;
+        }
+    }
+
+    return params;
+}
+
 function parsePart(source) {
     const parts = extractBlocks(source, "part");
     const templates = new Map();
@@ -347,6 +405,19 @@ function parsePart(source) {
     }
 
     return templates;
+}
+
+function parseModules(source) {
+    return new Map(extractBlocks(source, "module", { allowParameters: true }).map((module) => [
+        module.name,
+        {
+            name: module.name,
+            parameters: module.parameters
+                ? module.parameters.split(",").map((parameter) => parameter.trim()).filter(Boolean)
+                : [],
+            body: module.body,
+        },
+    ]));
 }
 
 function includedFiles(filePath, loaded = new Set()) {
@@ -399,8 +470,8 @@ function createPrimitiveTemplates() {
 }
 
 function createComponent(template, params = {}) {
-    if (template.primitive && !("value" in params)) {
-        throw new Error(`${template.name} requires a value`);
+    if (template.primitive && !("value" in params) && !("LCSC" in params)) {
+        throw new Error(`${template.name} requires a value or LCSC part`);
     }
     const footprint = params.footprint;
 
@@ -410,6 +481,7 @@ function createComponent(template, params = {}) {
                 this.info = {
                     ...template.info,
                     footprint: footprint || template.info.footprint,
+                    LCSC: params.LCSC || template.info.LCSC,
                 };
                 this.pins = [];
                 if (template.primitive) {
@@ -429,11 +501,13 @@ function createComponentInstances(template, params, count) {
     return Array.from({ length: count }, () => createComponent(template, params));
 }
 
-function annotateComponent(component, name, index) {
+function annotateComponent(component, name, index, modulePath = []) {
     component.__schrune = {
         ...(component.__schrune || {}),
         name,
         arrayIndex: index,
+        modulePath,
+        moduleName: modulePath.join("."),
     };
     return component;
 }
@@ -470,6 +544,9 @@ function findInclude(baseDir, includeName) {
     if (fs.existsSync(directPath)) {
         return directPath;
     }
+    const includeFileNames = path.extname(includeName)
+        ? [includeName]
+        : [includeName, `${includeName}.schrune`];
 
     const matches = [];
 
@@ -478,7 +555,7 @@ function findInclude(baseDir, includeName) {
             const entryPath = path.join(dir, entry.name);
             if (entry.isDirectory()) {
                 walk(entryPath);
-            } else if (entry.isFile() && entry.name === includeName) {
+            } else if (entry.isFile() && includeFileNames.includes(entry.name)) {
                 matches.push(entryPath);
             }
         }
@@ -500,7 +577,7 @@ function findInclude(baseDir, includeName) {
 function loadFile(filePath, loaded = new Set()) {
     const resolvedPath = path.resolve(filePath);
     if (loaded.has(resolvedPath)) {
-        return { source: "", templates: new Map() };
+        return { source: "", templates: new Map(), modules: new Map() };
     }
 
     loaded.add(resolvedPath);
@@ -508,6 +585,7 @@ function loadFile(filePath, loaded = new Set()) {
     const rawSource = fs.readFileSync(resolvedPath, "utf8");
     const source = stripComments(rawSource);
     const templates = createPrimitiveTemplates();
+    const modules = new Map();
     if (/^\s*#import\b/m.test(source)) {
         throw new Error("Use #include to add files");
     }
@@ -521,13 +599,19 @@ function loadFile(filePath, loaded = new Set()) {
         for (const [name, template] of includeFile.templates) {
             templates.set(name, template);
         }
+        for (const [name, module] of includeFile.modules) {
+            modules.set(name, module);
+        }
     }
 
     for (const [name, template] of parsePart(source)) {
         templates.set(name, template);
     }
+    for (const [name, module] of parseModules(source)) {
+        modules.set(name, module);
+    }
 
-    return { source, templates };
+    return { source, templates, modules };
 }
 
 function uniqueNetName(preferred, used) {
@@ -543,64 +627,235 @@ function uniqueNetName(preferred, used) {
     return name;
 }
 
-function readNetReference(expression, nets) {
-    const value = expression.trim();
-    const railMatch = value.match(/^([A-Za-z_]\w*)\.(h|l)$/);
-    if (railMatch) {
-        const rail = nets[railMatch[1]];
-        if (!rail || typeof rail !== "object") {
-            throw new Error(`Unknown rail "${railMatch[1]}"`);
-        }
-        return rail[railMatch[2]];
-    }
+const UNIT_PREFIX_MULTIPLIERS = {
+    T: 1e12,
+    G: 1e9,
+    M: 1e6,
+    k: 1e3,
+    K: 1e3,
+    m: 1e-3,
+    u: 1e-6,
+    n: 1e-9,
+    p: 1e-12,
+};
 
-    if (!(value in nets)) {
-        throw new Error(`Unknown net "${value}"`);
-    }
-
-    return nets[value];
+function createVal(number, unit = "") {
+    return {
+        number,
+        unit,
+        valueOf() {
+            return this.number;
+        },
+        toString() {
+            return `${this.number}${this.unit}`;
+        },
+    };
 }
 
-function getNetValue(expression, nets) {
+function parseValLiteral(literal) {
+    const match = String(literal).trim().match(/^(-?\d+(?:\.\d+)?)([A-Za-z][A-Za-z0-9_/%]*)$/);
+    if (!match) {
+        return undefined;
+    }
+
+    const unit = match[2];
+    const multiplier = unit.length > 1 && UNIT_PREFIX_MULTIPLIERS[unit[0]] !== undefined
+        ? UNIT_PREFIX_MULTIPLIERS[unit[0]]
+        : 1;
+    return createVal(Number(match[1]) * multiplier, unit);
+}
+
+function normalizeValueExpression(expression) {
+    return expression.replace(/(^|[^A-Za-z0-9_."'])(-?\d+(?:\.\d+)?[A-Za-z][A-Za-z0-9_/%]*)/g, (_match, prefix, literal) => {
+        const value = parseValLiteral(literal);
+        return value ? `${prefix}__val(${value.number}, ${jsString(value.unit)})` : `${prefix}${literal}`;
+    });
+}
+
+function evaluateValueExpression(expression, scope, componentsByName) {
+    const trimmed = expression.trim();
+    const quoted = trimmed.match(/^["'](.*)["']$/);
+    if (quoted) {
+        return quoted[1];
+    }
+    if (trimmed.includes("+/-")) {
+        return parseValue(trimmed);
+    }
+
+    const values = {
+        __val: createVal,
+        ...evaluationScope(scope, componentsByName),
+    };
+    const names = Object.keys(values);
+    try {
+        return Function(...names, `"use strict"; return (${normalizeValueExpression(trimmed)});`)(...Object.values(values));
+    } catch (_error) {
+        return parseValue(trimmed);
+    }
+}
+
+function evaluateArgumentList(args, scope, componentsByName) {
+    return Object.fromEntries(Object.entries(parseConstructorArgExpressions(args)).map(([name, expression]) => [
+        name,
+        evaluateValueExpression(expression, scope, componentsByName),
+    ]));
+}
+
+function moduleNetBinding(expression, modulesByName) {
+    const parts = expression.trim().split(".");
+    if (!modulesByName || parts.length < 2 || !modulesByName.has(parts[0])) {
+        return undefined;
+    }
+
+    let owner = modulesByName.get(parts[0]).nets;
+    for (let i = 1; i < parts.length - 1; i++) {
+        owner = owner[parts[i]];
+        if (!owner || typeof owner !== "object") {
+            return undefined;
+        }
+    }
+
+    const key = parts[parts.length - 1];
+    if (!(key in owner)) {
+        return undefined;
+    }
+
+    return {
+        value: owner[key],
+        set(value) {
+            if (isNetRef(owner[key])) {
+                owner[key].value = netRefName(value);
+                owner[key].aliasOf = isNetRef(value) ? value : undefined;
+                return;
+            }
+            owner[key] = value;
+        },
+    };
+}
+
+function netBinding(expression, nets, modulesByName) {
     const value = expression.trim();
     const railMatch = value.match(/^([A-Za-z_]\w*)\.(h|l)$/);
     if (railMatch) {
         const rail = nets[railMatch[1]];
         if (rail && typeof rail === "object") {
-            return rail[railMatch[2]];
+            return {
+                value: rail[railMatch[2]],
+                set(nextValue) {
+                    if (isNetRef(rail[railMatch[2]])) {
+                        rail[railMatch[2]].value = netRefName(nextValue);
+                        rail[railMatch[2]].aliasOf = isNetRef(nextValue) ? nextValue : undefined;
+                        return;
+                    }
+                    rail[railMatch[2]] = nextValue;
+                },
+            };
         }
-        return undefined;
+    }
+
+    const netGroupMatch = value.match(/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/);
+    if (netGroupMatch) {
+        const owner = nets[netGroupMatch[1]];
+        if (owner && typeof owner === "object" && netGroupMatch[2] in owner) {
+            return {
+                value: owner[netGroupMatch[2]],
+                set(nextValue) {
+                    if (isNetRef(owner[netGroupMatch[2]])) {
+                        owner[netGroupMatch[2]].value = netRefName(nextValue);
+                        owner[netGroupMatch[2]].aliasOf = isNetRef(nextValue) ? nextValue : undefined;
+                        return;
+                    }
+                    owner[netGroupMatch[2]] = nextValue;
+                },
+            };
+        }
     }
 
     if (value in nets) {
-        return nets[value];
+        return {
+            value: nets[value],
+            set(nextValue) {
+                if (isNetRef(nets[value])) {
+                    nets[value].value = netRefName(nextValue);
+                    nets[value].aliasOf = isNetRef(nextValue) ? nextValue : undefined;
+                    return;
+                }
+                nets[value] = nextValue;
+            },
+        };
     }
 
-    return undefined;
+    return moduleNetBinding(value, modulesByName);
 }
 
-function setNetValue(expression, nets, value) {
-    const trimmed = expression.trim();
-    const railMatch = trimmed.match(/^([A-Za-z_]\w*)\.(h|l)$/);
-    if (railMatch) {
-        const rail = nets[railMatch[1]];
-        if (!rail || typeof rail !== "object") {
-            throw new Error(`Unknown rail "${railMatch[1]}"`);
+function readNetReference(expression, nets, modulesByName) {
+    const binding = netBinding(expression, nets, modulesByName);
+    if (!binding) {
+        throw new Error(`Unknown net "${expression.trim()}"`);
+    }
+
+    return binding.value;
+}
+
+function getNetValue(expression, nets, modulesByName) {
+    const binding = netBinding(expression, nets, modulesByName);
+    return binding && binding.value;
+}
+
+function connectNetBindings(left, right, leftExpression, rightExpression, nameOverrides, netAliases = new Map()) {
+    if (isNetGroup(left.value) || isNetGroup(right.value)) {
+        if (!isNetGroup(left.value) || !isNetGroup(right.value)) {
+            throw new Error(`Connection joins net group and net "${leftExpression} ~ ${rightExpression}"`);
         }
-        rail[railMatch[2]] = value;
+        if (left.value.type !== right.value.type) {
+            throw new Error(`Connection joins net groups of different types "${left.value.type}" and "${right.value.type}"`);
+        }
+
+        for (const signalName of netTypeSignals(left.value.type)) {
+            const leftSignal = left.value[signalName];
+            const rightSignal = right.value[signalName];
+            if (!leftSignal || !rightSignal) {
+                throw new Error(`Net group "${left.value.type}" is missing signal "${signalName}"`);
+            }
+            connectNetBindings(
+                { value: leftSignal, set(value) { left.value[signalName] = value; } },
+                { value: rightSignal, set(value) { right.value[signalName] = value; } },
+                `${leftExpression}.${signalName}`,
+                `${rightExpression}.${signalName}`,
+                nameOverrides,
+                netAliases
+            );
+        }
         return;
     }
 
-    if (!(trimmed in nets)) {
-        throw new Error(`Unknown net "${trimmed}"`);
+    if (isRailValue(left.value) || isRailValue(right.value)) {
+        if (!isRailValue(left.value) || !isRailValue(right.value)) {
+            throw new Error(`Connection joins rail and net "${leftExpression} ~ ${rightExpression}"`);
+        }
+
+        connectNetBindings(
+            { value: left.value.h, set(value) { left.value.h = value; } },
+            { value: right.value.h, set(value) { right.value.h = value; } },
+            `${leftExpression}.h`,
+            `${rightExpression}.h`,
+            nameOverrides,
+            netAliases
+        );
+        connectNetBindings(
+            { value: left.value.l, set(value) { left.value.l = value; } },
+            { value: right.value.l, set(value) { right.value.l = value; } },
+            `${leftExpression}.l`,
+            `${rightExpression}.l`,
+            nameOverrides,
+            netAliases
+        );
+        return;
     }
 
-    nets[trimmed] = value;
-}
+    const leftName = netRefName(left.value);
+    const rightName = netRefName(right.value);
 
-function resolveNetConnection(leftExpression, rightExpression, nets, nameOverrides) {
-    const leftName = getNetValue(leftExpression, nets);
-    const rightName = getNetValue(rightExpression, nets);
     if (leftName === rightName) {
         return;
     }
@@ -613,11 +868,23 @@ function resolveNetConnection(leftExpression, rightExpression, nets, nameOverrid
     }
 
     if (leftNamed) {
-        setNetValue(rightExpression, nets, leftName);
+        netAliases.set(rightName, leftName);
+        right.set(left.value);
         return;
     }
 
-    setNetValue(leftExpression, nets, rightName);
+    netAliases.set(leftName, rightName);
+    left.set(right.value);
+}
+
+function resolveNetConnection(leftExpression, rightExpression, nets, nameOverrides, modulesByName, netAliases) {
+    const left = netBinding(leftExpression, nets, modulesByName);
+    const right = netBinding(rightExpression, nets, modulesByName);
+    if (!left || !right) {
+        throw new Error(`Unknown net connection "${leftExpression} ~ ${rightExpression}"`);
+    }
+
+    connectNetBindings(left, right, leftExpression, rightExpression, nameOverrides, netAliases);
 }
 
 function evaluateIndex(expression, scope) {
@@ -664,8 +931,9 @@ function parseComponentReference(expression, scope = {}) {
     return undefined;
 }
 
-function componentRefName(componentRef) {
-    return componentRef.index === undefined ? componentRef.name : `${componentRef.name}_${componentRef.index}`;
+function componentRefName(componentRef, scope = {}) {
+    const localName = componentRef.index === undefined ? componentRef.name : `${componentRef.name}_${componentRef.index}`;
+    return `${scope.__pathPrefix || ""}${localName}`;
 }
 
 function getComponentValue(componentsByName, componentRef) {
@@ -702,7 +970,7 @@ function getPinKey(expression, scope = {}) {
     if (nestedMatch) {
         const componentRef = parseComponentReference(nestedMatch[1], scope);
         const index = evaluateIndex(nestedMatch[3], scope);
-        const componentName = componentRefName(componentRef);
+            const componentName = componentRefName(componentRef, scope);
         return {
             componentRef,
             path: [nestedMatch[2], index],
@@ -715,7 +983,7 @@ function getPinKey(expression, scope = {}) {
     if (bracketMatch) {
         const componentRef = parseComponentReference(bracketMatch[1], scope);
         const pin = evaluateIndex(bracketMatch[2], scope);
-        const componentName = componentRefName(componentRef);
+            const componentName = componentRefName(componentRef, scope);
         return {
             componentRef,
             path: [pin],
@@ -727,7 +995,7 @@ function getPinKey(expression, scope = {}) {
     const dotMatch = value.match(/^([A-Za-z_]\w*(?:\[[^\]]+\])?)\.([A-Za-z_]\w*|\d+)$/);
     if (dotMatch) {
         const componentRef = parseComponentReference(dotMatch[1], scope);
-        const componentName = componentRefName(componentRef);
+            const componentName = componentRefName(componentRef, scope);
         return {
             componentRef,
             path: [dotMatch[2]],
@@ -749,8 +1017,8 @@ function getComponentPin(componentsByName, expression, scope = {}) {
     return getPinFromPath(component, pinKey.path);
 }
 
-function readEndpoint(expression, componentsByName, nets, scope = {}) {
-    const net = getNetValue(expression, nets);
+function readEndpoint(expression, componentsByName, nets, scope = {}, modulesByName) {
+    const net = getNetValue(expression, nets, modulesByName);
     if (net !== undefined) {
         return {
             type: "net",
@@ -775,9 +1043,9 @@ function readEndpoint(expression, componentsByName, nets, scope = {}) {
     };
 }
 
-function connectEndpoints(leftExpression, rightExpression, componentsByName, nets, pinGroups, nameOverrides, scope = {}) {
-    const left = readEndpoint(leftExpression, componentsByName, nets, scope);
-    const right = readEndpoint(rightExpression, componentsByName, nets, scope);
+function connectEndpoints(leftExpression, rightExpression, componentsByName, nets, pinGroups, nameOverrides, scope = {}, modulesByName, netAliases) {
+    const left = readEndpoint(leftExpression, componentsByName, nets, scope, modulesByName);
+    const right = readEndpoint(rightExpression, componentsByName, nets, scope, modulesByName);
 
     if (left.type === "pin" && right.type === "pin") {
         pinGroups.union(left, right);
@@ -785,16 +1053,22 @@ function connectEndpoints(leftExpression, rightExpression, componentsByName, net
     }
 
     if (left.type === "pin" && right.type === "net") {
+        if (isNetGroup(right.value)) {
+            throw new Error(`Net group "${rightExpression}" must be connected via one of its signals`);
+        }
         pinGroups.connectExplicit(left, right.value);
         return;
     }
 
     if (left.type === "net" && right.type === "pin") {
+        if (isNetGroup(left.value)) {
+            throw new Error(`Net group "${leftExpression}" must be connected via one of its signals`);
+        }
         pinGroups.connectExplicit(right, left.value);
         return;
     }
 
-    resolveNetConnection(leftExpression, rightExpression, nets, nameOverrides);
+    resolveNetConnection(leftExpression, rightExpression, nets, nameOverrides, modulesByName, netAliases);
 }
 
 function validateBridgeComponent(name, componentsByName, scope = {}) {
@@ -813,7 +1087,7 @@ function validateBridgeComponent(name, componentsByName, scope = {}) {
     }
 }
 
-function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrides, scope = {}) {
+function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrides, scope = {}, modulesByName, netAliases) {
     const parts = statement.split("~>").map((part) => part.trim()).filter(Boolean);
     if (parts.length < 3) {
         throw new Error(`Invalid bridge connection "${statement}"`);
@@ -824,7 +1098,7 @@ function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrid
         validateBridgeComponent(componentName, componentsByName, scope);
     }
 
-    connectEndpoints(`${parts[0]}`, `${middleComponents[0]}[0]`, componentsByName, nets, pinGroups, nameOverrides, scope);
+    connectEndpoints(`${parts[0]}`, `${middleComponents[0]}[0]`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
 
     for (let i = 0; i < middleComponents.length - 1; i++) {
         connectEndpoints(
@@ -834,7 +1108,9 @@ function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrid
             nets,
             pinGroups,
             nameOverrides,
-            scope
+            scope,
+            modulesByName,
+            netAliases
         );
     }
 
@@ -845,7 +1121,9 @@ function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrid
         nets,
         pinGroups,
         nameOverrides,
-        scope
+        scope,
+        modulesByName,
+        netAliases
     );
 }
 
@@ -919,19 +1197,28 @@ function executeForStatement(statement, context, scope) {
 function executeStatement(statement, context, scope = {}) {
     const {
         templates,
+        moduleTemplates,
         components,
         componentsByName,
+        modulesByName,
         nets,
         pinGroups,
         nameOverrides,
+        netAliases,
     } = context;
+
+    const valMatch = statement.match(/^val\s+([A-Za-z_]\w*)\s*=\s*(.+)$/);
+    if (valMatch) {
+        scope[valMatch[1]] = evaluateValueExpression(valMatch[2], scope, componentsByName);
+        return;
+    }
 
     const arrayPartMatch = statement.match(/^part\[(\d+)\]\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
     if (arrayPartMatch) {
         const count = Number(arrayPartMatch[1]);
         const instanceName = arrayPartMatch[2];
         const templateName = arrayPartMatch[3];
-        const params = parseConstructorArgs(arrayPartMatch[4]);
+        const params = evaluateArgumentList(arrayPartMatch[4], scope, componentsByName);
         const template = templates.get(templateName);
         if (!template) {
             throw new Error(`Unknown part "${templateName}"`);
@@ -941,17 +1228,17 @@ function executeStatement(statement, context, scope = {}) {
         }
 
         const instances = createComponentInstances(template, params, count)
-            .map((component, index) => annotateComponent(component, instanceName, index));
+            .map((component, index) => annotateComponent(component, instanceName, index, scope.__modulePath));
         componentsByName.set(instanceName, instances);
         components.push(...instances);
         return;
     }
 
-    const partMatch = statement.match(/^(?:part\s+)?([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
+    const partMatch = statement.match(/^(?:part\s+)?([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)(?:\s*\(([\s\S]*)\))?$/);
     if (partMatch) {
         const instanceName = partMatch[1];
         const templateName = partMatch[2];
-        const params = parseConstructorArgs(partMatch[3]);
+        const params = evaluateArgumentList(partMatch[3] || "", scope, componentsByName);
         const template = templates.get(templateName);
         if (!template) {
             throw new Error(`Unknown part "${templateName}"`);
@@ -960,9 +1247,44 @@ function executeStatement(statement, context, scope = {}) {
             throw new Error(`Duplicate component "${instanceName}"`);
         }
 
-        const component = annotateComponent(createComponent(template, params), instanceName);
+        const component = annotateComponent(createComponent(template, params), instanceName, undefined, scope.__modulePath);
         componentsByName.set(instanceName, component);
         components.push(component);
+        return;
+    }
+
+    const moduleMatch = statement.match(/^mod\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
+    if (moduleMatch) {
+        const instanceName = moduleMatch[1];
+        const moduleName = moduleMatch[2];
+        const moduleTemplate = moduleTemplates.get(moduleName);
+        if (!moduleTemplate) {
+            throw new Error(`Unknown module "${moduleName}"`);
+        }
+        if (modulesByName.has(instanceName) || componentsByName.has(instanceName)) {
+            throw new Error(`Duplicate module "${instanceName}"`);
+        }
+
+        const argExpressions = splitTopLevelEntries(moduleMatch[3]);
+        if (argExpressions.length > moduleTemplate.parameters.length) {
+            throw new Error(`Too many arguments for module "${moduleName}"`);
+        }
+        const moduleScope = {};
+        moduleTemplate.parameters.forEach((parameter, index) => {
+            if (index < argExpressions.length) {
+                moduleScope[parameter] = evaluateValueExpression(argExpressions[index], scope, componentsByName);
+            }
+        });
+        const pathPrefix = `${scope.__pathPrefix || ""}${instanceName}_`;
+        const moduleInstance = compileModule(moduleTemplate, context, {
+            instanceName,
+            pathPrefix,
+            scope: {
+                ...moduleScope,
+                __modulePath: [...(scope.__modulePath || []), instanceName],
+            },
+        });
+        modulesByName.set(instanceName, moduleInstance);
         return;
     }
 
@@ -995,7 +1317,7 @@ function executeStatement(statement, context, scope = {}) {
 
     const bridgeMatch = statement.match(/^.+?\s*~>\s*.+$/);
     if (bridgeMatch) {
-        connectBridge(statement, componentsByName, nets, pinGroups, nameOverrides, scope);
+        connectBridge(statement, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
         return;
     }
 
@@ -1008,7 +1330,9 @@ function executeStatement(statement, context, scope = {}) {
             nets,
             pinGroups,
             nameOverrides,
-            scope
+            scope,
+            modulesByName,
+            netAliases
         );
     }
 }
@@ -1068,13 +1392,14 @@ class PinNetGroups {
     connectExplicit(pin, netName) {
         this.add(pin);
         const root = this.find(pin.key);
+        const resolvedNet = isNetRef(netName) ? netName.value : netName;
         const existing = this.explicitNets.get(root);
-        if (existing && existing !== netName) {
-            throw new Error(`Pin "${pin.key}" connects to both "${existing}" and "${netName}"`);
+        if (existing && existing !== resolvedNet) {
+            throw new Error(`Pin "${pin.key}" connects to both "${existing}" and "${resolvedNet}"`);
         }
 
-        this.explicitNets.set(root, netName);
-        pin.pin.net = netName;
+        this.explicitNets.set(root, resolvedNet);
+        pin.pin.net = resolvedNet;
     }
 
     groups() {
@@ -1094,10 +1419,92 @@ class PinNetGroups {
     }
 }
 
+const NET_TYPE_SIGNALS = {
+    i2c: ["SDA", "SCL"],
+    uart: ["RX", "TX"],
+    spi: ["MOSI", "MISO", "CLK"],
+};
+
+function normalizeNetType(type) {
+    const normalized = String(type || "").trim().toLowerCase();
+    if (!NET_TYPE_SIGNALS[normalized]) {
+        throw new Error(`Unknown net type "${type}"`);
+    }
+    return normalized;
+}
+
+function netTypeSignals(type) {
+    return NET_TYPE_SIGNALS[normalizeNetType(type)];
+}
+
+function createNetRef(value, isOverride = false) {
+    return {
+        __netRef: true,
+        value,
+        isOverride,
+        aliasOf: undefined,
+    };
+}
+
+function createNetGroup(name, type, signalNames, pathPrefix = "", nameOverrides = new Map()) {
+    const group = {
+        __netGroup: true,
+        type,
+    };
+
+    for (const signalName of signalNames) {
+        const key = `${name}.${signalName}`;
+        const overrideName = nameOverrides.get(key);
+        const finalName = overrideName || `${pathPrefix}${name}.${signalName}`;
+        const ref = createNetRef(finalName, Boolean(overrideName));
+        ref.group = name;
+        ref.signal = signalName;
+        group[signalName] = ref;
+    }
+
+    return group;
+}
+
+function isNetRef(value) {
+    return Boolean(value && typeof value === "object" && value.__netRef);
+}
+
+function isNetGroup(value) {
+    return Boolean(value && typeof value === "object" && value.__netGroup);
+}
+
+function isRailValue(value) {
+    return Boolean(value
+        && typeof value === "object"
+        && !isNetRef(value)
+        && !isNetGroup(value)
+        && Object.prototype.hasOwnProperty.call(value, "h")
+        && Object.prototype.hasOwnProperty.call(value, "l"));
+}
+
+function netRefName(value) {
+    return isNetRef(value) ? value.value : value;
+}
+
+function collectNetRefs(value, refs = [], seen = new Set()) {
+    if (!value || typeof value !== "object" || seen.has(value)) {
+        return refs;
+    }
+
+    if (isNetRef(value)) {
+        refs.push(value);
+        return refs;
+    }
+
+    seen.add(value);
+    for (const entry of Object.values(value)) {
+        collectNetRefs(entry, refs, seen);
+    }
+    return refs;
+}
+
 function collectNetNames(nets) {
-    return new Set(Object.values(nets).flatMap((net) => (
-        typeof net === "object" ? [net.h, net.l] : [net]
-    )));
+    return new Set(collectNetRefs(nets).map((net) => net.value));
 }
 
 function reserveNetName(preferred, usedNames, isOverride) {
@@ -1112,82 +1519,101 @@ function reserveNetName(preferred, usedNames, isOverride) {
     return uniqueNetName(preferred, usedNames);
 }
 
-function applyNetNames(declarations, nameOverrides) {
+function applyNetNames(declarations, nameOverrides, pathPrefix = "") {
     const usedNames = new Set();
     const nets = {};
 
     for (const declaration of declarations) {
-        if (declaration.kind === "net") {
+        if (declaration.kind === "net" && !declaration.type) {
             const finalName = nameOverrides.get(declaration.name) || declaration.defaultName;
             if (usedNames.has(finalName)) {
                 throw new Error(`Duplicate net name "${finalName}"`);
             }
             usedNames.add(finalName);
-            nets[declaration.name] = finalName;
+            nets[declaration.name] = createNetRef(finalName, Boolean(nameOverrides.get(declaration.name)));
             continue;
         }
 
-        const highKey = `${declaration.name}.h`;
-        const lowKey = `${declaration.name}.l`;
-        const highName = nameOverrides.get(highKey) || declaration.defaultHigh;
-        const lowName = nameOverrides.get(lowKey) || declaration.defaultLow;
+        if (declaration.kind === "rail") {
+            const highKey = `${declaration.name}.h`;
+            const lowKey = `${declaration.name}.l`;
+            const highName = nameOverrides.get(highKey) || declaration.defaultHigh;
+            const lowName = nameOverrides.get(lowKey) || declaration.defaultLow;
 
-        if (usedNames.has(highName)) {
-            throw new Error(`Duplicate net name "${highName}"`);
+            if (usedNames.has(highName)) {
+                throw new Error(`Duplicate net name "${highName}"`);
+            }
+            usedNames.add(highName);
+
+            if (usedNames.has(lowName)) {
+                throw new Error(`Duplicate net name "${lowName}"`);
+            }
+            usedNames.add(lowName);
+
+            nets[declaration.name] = {
+                h: createNetRef(highName, Boolean(nameOverrides.get(highKey))),
+                l: createNetRef(lowName, Boolean(nameOverrides.get(lowKey))),
+                voltage: undefined,
+            };
+            continue;
         }
-        usedNames.add(highName);
 
-        if (usedNames.has(lowName)) {
-            throw new Error(`Duplicate net name "${lowName}"`);
+        if (declaration.kind !== "net" || !declaration.type) {
+            throw new Error(`Unsupported declaration "${declaration.kind}"`);
         }
-        usedNames.add(lowName);
 
-        nets[declaration.name] = {
-            h: highName,
-            l: lowName,
-            voltage: undefined,
-        };
+        const signalNames = netTypeSignals(declaration.type);
+        const group = createNetGroup(declaration.name, declaration.type, signalNames, pathPrefix, nameOverrides);
+        for (const signalName of signalNames) {
+            const ref = group[signalName];
+            if (usedNames.has(ref.value)) {
+                throw new Error(`Duplicate net name "${ref.value}"`);
+            }
+            usedNames.add(ref.value);
+        }
+        nets[declaration.name] = group;
     }
 
     return nets;
 }
 
-function step1(filePath) {
-    const { source, templates } = loadFile(filePath);
-    const topModule = extractBlocks(source, "module", { allowParameters: true })
-        .find((module) => module.name === "top");
-    if (!topModule) {
-        throw new Error("No top module found");
-    }
-
-    const statements = splitStatements(topModule.body);
+function collectModuleDeclarations(statements, pathPrefix = "") {
     const declarations = [];
     const declarationNames = new Set();
     const provisionalNames = new Set();
     const nameOverrides = new Map();
 
     for (const statement of statements) {
-        const declarationMatch = statement.match(/^(net|rail)\s+([A-Za-z_]\w*)$/);
+        const declarationMatch = statement.match(/^(net(?:<([A-Za-z_]\w*)>)?|rail)\s+([A-Za-z_]\w*)$/);
         if (declarationMatch) {
-            const kind = declarationMatch[1];
-            const name = declarationMatch[2];
+            const kind = declarationMatch[1] === "rail" ? "rail" : "net";
+            const type = declarationMatch[2];
+            const name = declarationMatch[3];
             if (declarationNames.has(name)) {
                 throw new Error(`Duplicate declaration "${name}"`);
             }
             declarationNames.add(name);
 
             if (kind === "net") {
-                declarations.push({
-                    kind,
-                    name,
-                    defaultName: uniqueNetName(name, provisionalNames),
-                });
+                if (type) {
+                    declarations.push({
+                        kind,
+                        type: normalizeNetType(type),
+                        name,
+                    });
+                } else {
+                    declarations.push({
+                        kind,
+                        name,
+                        defaultName: uniqueNetName(`${pathPrefix}${name}`, provisionalNames),
+                    });
+                }
             } else {
                 declarations.push({
                     kind,
                     name,
-                    defaultHigh: uniqueNetName(`${name}_h`, provisionalNames),
-                    defaultLow: uniqueNetName(`${name}_l`, provisionalNames),
+                    defaultHigh: uniqueNetName(`${pathPrefix}${name}_h`, provisionalNames),
+                    defaultLow: uniqueNetName(`${pathPrefix}${name}_l`, provisionalNames),
                 });
             }
             continue;
@@ -1199,30 +1625,93 @@ function step1(filePath) {
         }
     }
 
-    const nets = applyNetNames(declarations, nameOverrides);
-    const components = [];
-    const componentsByName = new Map();
-    const pinGroups = new PinNetGroups();
-    const context = {
-        templates,
-        components,
-        componentsByName,
-        nets,
-        pinGroups,
+    return { declarations, nameOverrides };
+}
+
+function compileModule(moduleTemplate, context, options = {}) {
+    const statements = splitStatements(moduleTemplate.body);
+    const pathPrefix = options.pathPrefix || "";
+    const { declarations, nameOverrides } = collectModuleDeclarations(statements, pathPrefix);
+    for (const [key, value] of nameOverrides) {
+        context.nameOverrides.set(key, value);
+        context.nameOverrides.set(`${pathPrefix}${key}`, value);
+    }
+    const localNets = applyNetNames(declarations, nameOverrides, pathPrefix);
+    context.netScopes.push(localNets);
+    const localContext = {
+        ...context,
+        componentsByName: new Map(),
+        modulesByName: new Map(),
+        nets: localNets,
         nameOverrides,
+    };
+    const scope = {
+        ...(options.scope || {}),
+        __pathPrefix: pathPrefix,
     };
 
     for (const statement of statements) {
-        executeStatement(statement, context);
+        executeStatement(statement, localContext, scope);
     }
 
-    const usedNames = collectNetNames(nets);
+    return {
+        __module: true,
+        name: moduleTemplate.name,
+        instanceName: options.instanceName,
+        pathPrefix,
+        nets: localContext.nets,
+    };
+}
+
+function snapshotNetValue(value) {
+    if (isNetRef(value)) {
+        return value.value;
+    }
+
+    if (isNetGroup(value)) {
+        const snapshot = { type: value.type };
+        for (const signalName of netTypeSignals(value.type)) {
+            snapshot[signalName] = snapshotNetValue(value[signalName]);
+        }
+        return snapshot;
+    }
+
+    if (isRailValue(value)) {
+        return {
+            h: snapshotNetValue(value.h),
+            l: snapshotNetValue(value.l),
+            voltage: value.voltage,
+        };
+    }
+
+    return value;
+}
+
+function finalizeCompilation(context, topModule) {
+    const { pinGroups, nameOverrides, components } = context;
+    const usedNames = new Set();
+    const compiledNets = {};
+    for (const nets of context.netScopes) {
+        for (const name of collectNetNames(nets)) {
+            usedNames.add(name);
+        }
+        for (const [name, value] of Object.entries(nets)) {
+            compiledNets[name] = snapshotNetValue(value);
+        }
+    }
     const implicitNets = {};
+    function resolveAlias(netName) {
+        while (context.netAliases.has(netName)) {
+            netName = context.netAliases.get(netName);
+        }
+        return netName;
+    }
     for (const [root, pinKeys] of pinGroups.groups()) {
         const explicitNet = pinGroups.explicitNets.get(root);
         if (explicitNet) {
+            const finalExplicitNet = resolveAlias(explicitNet);
             for (const pinKey of pinKeys) {
-                pinGroups.pinFor(pinKey).net = explicitNet;
+                pinGroups.pinFor(pinKey).net = finalExplicitNet;
             }
             continue;
         }
@@ -1247,14 +1736,58 @@ function step1(filePath) {
         }
     }
 
+    function rewritePinNets(value) {
+        if (!value || typeof value !== "object") {
+            return;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(value, "net")) {
+            value.net = resolveAlias(value.net && value.net.value ? value.net.value : value.net);
+            return;
+        }
+
+        for (const entry of Object.values(value)) {
+            rewritePinNets(entry);
+        }
+    }
+
+    for (const component of components) {
+        rewritePinNets(component.pins);
+    }
+
     return {
         netList: usedNames,
         components,
+        modules: topModule ? [topModule] : [],
         nets: {
-            ...nets,
+            ...compiledNets,
             ...implicitNets,
         },
     };
+}
+
+function step1(filePath) {
+    const { modules, templates } = loadFile(filePath);
+    const topModule = modules.get("top");
+    if (!topModule) {
+        throw new Error("No top module found");
+    }
+
+    const context = {
+        templates,
+        moduleTemplates: modules,
+        components: [],
+        pinGroups: new PinNetGroups(),
+        netScopes: [],
+        nameOverrides: new Map(),
+        netAliases: new Map(),
+    };
+    const compiledTop = compileModule(topModule, context);
+    return finalizeCompilation({
+        ...context,
+        nets: compiledTop.nets,
+        nameOverrides: context.nameOverrides,
+    }, compiledTop);
 }
 
 function jsString(value) {
@@ -1337,16 +1870,24 @@ function collectTopDeclarations(statements) {
     const nameOverrides = new Map();
 
     for (const statement of statements) {
-        const declarationMatch = statement.match(/^(net|rail)\s+([A-Za-z_]\w*)$/);
-        if (declarationMatch) {
-            const kind = declarationMatch[1];
-            const name = declarationMatch[2];
+        const declaration = parseNetDeclaration(statement);
+        if (declaration) {
+            const { kind, type, name } = declaration;
             if (declarationNames.has(name)) {
                 throw new Error(`Duplicate declaration "${name}"`);
             }
             declarationNames.add(name);
 
             if (kind === "net") {
+                if (type) {
+                    declarations.push({
+                        kind,
+                        type,
+                        name,
+                    });
+                    continue;
+                }
+
                 declarations.push({
                     kind,
                     name,
@@ -1372,18 +1913,46 @@ function collectTopDeclarations(statements) {
     return { declarations, nameOverrides };
 }
 
+function parseNetDeclaration(statement) {
+    const match = statement.match(/^(net(?:<([A-Za-z_]\w*)>)?|rail)\s+([A-Za-z_]\w*)$/);
+    if (!match) {
+        return undefined;
+    }
+
+    return {
+        kind: match[1] === "rail" ? "rail" : "net",
+        type: match[2] ? normalizeNetType(match[2]) : undefined,
+        name: match[3],
+    };
+}
+
 function primitiveIncludeFileName(name) {
     return `${name.toLowerCase()}.js`;
 }
 
 function renderConstructorArgs(args) {
-    const params = parseConstructorArgs(args);
-    return Object.keys(params).length ? renderObjectLiteral(params, 4) : "";
+    const params = parseConstructorArgExpressions(args || "");
+    const entries = Object.entries(params);
+    if (!entries.length) {
+        return "";
+    }
+
+    return `{\n${entries.map(([key, value]) => `        ${JSON.stringify(key)}: ${renderValueExpression(value)}`).join(",\n")}\n    }`;
 }
 
 function renderComponentConstructor(templateName, args) {
     const params = renderConstructorArgs(args);
     return params ? `new ${templateName}(${params})` : `new ${templateName}()`;
+}
+
+function renderValueExpression(expression) {
+    const trimmed = expression.trim();
+    const quoted = trimmed.match(/^["'](.*)["']$/);
+    if (quoted || trimmed.includes("+/-")) {
+        return jsString(parseValue(trimmed));
+    }
+
+    return normalizeValueExpression(trimmed);
 }
 
 function componentReferenceParts(expression) {
@@ -1428,6 +1997,14 @@ function renderPinEndpoint(expression) {
 function renderEndpoint(expression, context) {
     const value = expression.trim();
     const railMatch = value.match(/^([A-Za-z_]\w*)\.(h|l)$/);
+    const groupMatch = value.match(/^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/);
+    const moduleEndpointMatch = value.match(/^([A-Za-z_]\w*)\./);
+    if (groupMatch && context.netGroups && context.netGroups.has(groupMatch[1])) {
+        return `__net(${value})`;
+    }
+    if (moduleEndpointMatch && context.moduleNames && context.moduleNames.has(moduleEndpointMatch[1])) {
+        return `__net(${value})`;
+    }
     if (context.netNames.has(value) || context.netNames.has(expression.trim()) || /^[A-Za-z_]\w*$/.test(value) && context.netNames.has(value)) {
         return `__net(${value})`;
     }
@@ -1450,8 +2027,12 @@ function indentLines(source, spaces) {
 
 function renderStatements(statements, indent = 4, context = { netNames: new Set(), railNames: new Set() }) {
     const lines = [];
+    const nextContext = {
+        ...context,
+        moduleNames: context.moduleNames || new Set(),
+    };
     for (const statement of statements) {
-        lines.push(...renderStatement(statement, indent, context));
+        lines.push(...renderStatement(statement, indent, nextContext));
     }
     return lines;
 }
@@ -1459,8 +2040,13 @@ function renderStatements(statements, indent = 4, context = { netNames: new Set(
 function renderStatement(statement, indent = 4, context = { netNames: new Set(), railNames: new Set() }) {
     const padding = " ".repeat(indent);
 
-    if (/^(net|rail)\s+/.test(statement) || /^.+?\.name\s*=/.test(statement)) {
+    if (parseNetDeclaration(statement) || /^.+?\.name\s*=/.test(statement)) {
         return [];
+    }
+
+    const valMatch = statement.match(/^val\s+([A-Za-z_]\w*)\s*=\s*(.+)$/);
+    if (valMatch) {
+        return [`${padding}const ${valMatch[1]} = ${renderValueExpression(valMatch[2])};`];
     }
 
     const arrayPartMatch = statement.match(/^part\[(\d+)\]\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
@@ -1468,9 +2054,16 @@ function renderStatement(statement, indent = 4, context = { netNames: new Set(),
         return [`${padding}const ${arrayPartMatch[2]} = __componentArray(${arrayPartMatch[1]}, () => ${renderComponentConstructor(arrayPartMatch[3], arrayPartMatch[4])});`];
     }
 
-    const partMatch = statement.match(/^(?:part\s+)?([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
+    const partMatch = statement.match(/^(?:part\s+)?([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)(?:\s*\(([\s\S]*)\))?$/);
     if (partMatch) {
-        return [`${padding}const ${partMatch[1]} = __component(() => ${renderComponentConstructor(partMatch[2], partMatch[3])});`];
+        return [`${padding}const ${partMatch[1]} = __component(() => ${renderComponentConstructor(partMatch[2], partMatch[3] || "")});`];
+    }
+
+    const moduleMatch = statement.match(/^mod\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
+    if (moduleMatch) {
+        const args = splitTopLevelEntries(moduleMatch[3]).map(renderValueExpression).join(", ");
+        context.moduleNames.add(moduleMatch[1]);
+        return [`${padding}const ${moduleMatch[1]} = __module(${jsString(moduleMatch[1])}, () => ${moduleMatch[2]}(${args}));`];
     }
 
     const voltageMatch = statement.match(/^([A-Za-z_]\w*)\.voltage\s*=\s*(.+)$/);
@@ -1533,7 +2126,32 @@ function renderRuntimeHelpers() {
         `    const nets = {};\n` +
         `    const pinGroups = new Map();\n` +
         `    const explicitNets = new Map();\n` +
+        `    const netAliases = new Map();\n` +
         `    const pinsByKey = new Map();\n` +
+        `    const scopeStack = [];\n` +
+        `    const netTypeSignals = ${jsString(NET_TYPE_SIGNALS)};\n` +
+        `\n` +
+        `    function __val(number, unit = "") {\n` +
+        `        return {\n` +
+        `            number,\n` +
+        `            unit,\n` +
+        `            valueOf() { return this.number; },\n` +
+        `            toString() { return String(this.number) + this.unit; },\n` +
+        `        };\n` +
+        `    }\n` +
+        `\n` +
+        `    function __scopeName(name) {\n` +
+        `        return scopeStack.join("") + name;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __module(instanceName, factory) {\n` +
+        `        scopeStack.push(instanceName + "_");\n` +
+        `        try {\n` +
+        `            return factory();\n` +
+        `        } finally {\n` +
+        `            scopeStack.pop();\n` +
+        `        }\n` +
+        `    }\n` +
         `\n` +
         `    function __netRef(name, value, isOverride = false) {\n` +
         `        return { __netRef: true, name, value, isOverride };\n` +
@@ -1541,8 +2159,23 @@ function renderRuntimeHelpers() {
         `\n` +
         `    function __declareNet(name, value, isOverride = false) {\n` +
         `        const ref = __netRef(name, value, isOverride);\n` +
-        `        nets[name] = ref;\n` +
+        `        nets[__scopeName(name)] = ref;\n` +
         `        return ref;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __declareNetGroup(name, type) {\n` +
+        `        const scopedName = __scopeName(name);\n` +
+        `        const group = {\n` +
+        `            __netGroup: true,\n` +
+        `            type,\n` +
+        `        };\n` +
+        `        for (const signalName of netTypeSignals[type]) {\n` +
+        `            group[signalName] = __netRef(scopedName + "." + signalName, scopedName + "." + signalName, false);\n` +
+        `            group[signalName].group = scopedName;\n` +
+        `            group[signalName].signal = signalName;\n` +
+        `        }\n` +
+        `        nets[scopedName] = group;\n` +
+        `        return group;\n` +
         `    }\n` +
         `\n` +
         `    function __declareRail(name, high, low, highOverride = false, lowOverride = false) {\n` +
@@ -1551,7 +2184,7 @@ function renderRuntimeHelpers() {
         `            l: __netRef(name + ".l", low, lowOverride),\n` +
         `            voltage: undefined,\n` +
         `        };\n` +
-        `        nets[name] = rail;\n` +
+        `        nets[__scopeName(name)] = rail;\n` +
         `        return rail;\n` +
         `    }\n` +
         `\n` +
@@ -1605,6 +2238,26 @@ function renderRuntimeHelpers() {
         `\n` +
         `    function __connect(left, right) {\n` +
         `        if (left.type === "net" && right.type === "net") {\n` +
+        `            if (left.ref.__netGroup || right.ref.__netGroup) {\n` +
+        `                if (!left.ref.__netGroup || !right.ref.__netGroup) {\n` +
+        `                    throw new Error("Connection joins net group and net");\n` +
+        `                }\n` +
+        `                if (left.ref.type !== right.ref.type) {\n` +
+        `                    throw new Error(\`Connection joins net groups of different types "\${left.ref.type}" and "\${right.ref.type}"\`);\n` +
+        `                }\n` +
+        `                for (const signalName of netTypeSignals[left.ref.type]) {\n` +
+        `                    __connect(__net(left.ref[signalName]), __net(right.ref[signalName]));\n` +
+        `                }\n` +
+        `                return;\n` +
+        `            }\n` +
+        `            if (!left.ref.__netRef || !right.ref.__netRef) {\n` +
+        `                if (left.ref.__netRef || right.ref.__netRef) {\n` +
+        `                    throw new Error("Connection joins rail and net");\n` +
+        `                }\n` +
+        `                __connect(__net(left.ref.h), __net(right.ref.h));\n` +
+        `                __connect(__net(left.ref.l), __net(right.ref.l));\n` +
+        `                return;\n` +
+        `            }\n` +
         `            if (left.ref.value === right.ref.value) {\n` +
         `                return;\n` +
         `            }\n` +
@@ -1612,9 +2265,11 @@ function renderRuntimeHelpers() {
         `                throw new Error(\`Connection joins nets "\${left.ref.value}" and "\${right.ref.value}"\`);\n` +
         `            }\n` +
         `            if (left.ref.isOverride) {\n` +
+        `                netAliases.set(right.ref.value, left.ref.value);\n` +
         `                right.ref.value = left.ref.value;\n` +
         `                right.ref.aliasOf = __rootNetRef(left.ref);\n` +
         `            } else {\n` +
+        `                netAliases.set(left.ref.value, right.ref.value);\n` +
         `                left.ref.value = right.ref.value;\n` +
         `                left.ref.aliasOf = __rootNetRef(right.ref);\n` +
         `            }\n` +
@@ -1662,6 +2317,12 @@ function renderRuntimeHelpers() {
         `        const usedNames = new Set();\n` +
         `        const usedNetRoots = new Map();\n` +
         `        const compiledNets = {};\n` +
+        `        function resolveAlias(name) {\n` +
+        `            while (netAliases.has(name)) {\n` +
+        `                name = netAliases.get(name);\n` +
+        `            }\n` +
+        `            return name;\n` +
+        `        }\n` +
         `        function addNetName(ref) {\n` +
         `            const root = __rootNetRef(ref);\n` +
         `            if (usedNames.has(ref.value) && usedNetRoots.get(ref.value) !== root) {\n` +
@@ -1675,6 +2336,13 @@ function renderRuntimeHelpers() {
         `            if (value.__netRef) {\n` +
         `                addNetName(value);\n` +
         `                compiledNets[name] = value.value;\n` +
+        `            } else if (value.__netGroup) {\n` +
+        `                const snapshot = { type: value.type };\n` +
+        `                for (const signalName of netTypeSignals[value.type]) {\n` +
+        `                    addNetName(value[signalName]);\n` +
+        `                    snapshot[signalName] = value[signalName].value;\n` +
+        `                }\n` +
+        `                compiledNets[name] = snapshot;\n` +
         `            } else {\n` +
         `                for (const side of ["h", "l"]) {\n` +
         `                    addNetName(value[side]);\n` +
@@ -1693,8 +2361,9 @@ function renderRuntimeHelpers() {
         `        for (const [root, keys] of groups) {\n` +
         `            const explicit = explicitNets.get(root);\n` +
         `            if (explicit) {\n` +
+        `                const finalExplicit = resolveAlias(explicit);\n` +
         `                for (const key of keys) {\n` +
-        `                    pinsByKey.get(key).pin.net = explicit;\n` +
+        `                    pinsByKey.get(key).pin.net = finalExplicit;\n` +
         `                }\n` +
         `                continue;\n` +
         `            }\n` +
@@ -1709,16 +2378,51 @@ function renderRuntimeHelpers() {
         `    }\n`;
 }
 
+function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTemplate.name) {
+    const statements = splitStatements(moduleTemplate.body);
+    const { declarations, nameOverrides } = collectTopDeclarations(statements);
+    const moduleContext = {
+        ...context,
+        netNames: new Set(declarations.filter((declaration) => declaration.kind === "net").map((declaration) => declaration.name)),
+        netGroups: new Map(declarations.filter((declaration) => declaration.kind === "net" && declaration.type).map((declaration) => [declaration.name, declaration.type])),
+        railNames: new Set(declarations.filter((declaration) => declaration.kind === "rail").map((declaration) => declaration.name)),
+    };
+    const parameters = moduleTemplate.parameters.join(", ");
+    const declarationLines = declarations.map((declaration) => {
+        if (declaration.kind === "net") {
+            if (declaration.type) {
+                return `    const ${declaration.name} = __declareNetGroup(${jsString(declaration.name)}, ${jsString(declaration.type)});`;
+            }
+            const finalName = nameOverrides.get(declaration.name) || declaration.defaultName;
+            return `    const ${declaration.name} = __declareNet(${jsString(declaration.name)}, __scopeName(${jsString(finalName)}), ${nameOverrides.has(declaration.name)});`;
+        }
+
+        const highKey = `${declaration.name}.h`;
+        const lowKey = `${declaration.name}.l`;
+        return `    const ${declaration.name} = __declareRail(${jsString(declaration.name)}, __scopeName(${jsString(nameOverrides.get(highKey) || declaration.defaultHigh)}), __scopeName(${jsString(nameOverrides.get(lowKey) || declaration.defaultLow)}), ${nameOverrides.has(highKey)}, ${nameOverrides.has(lowKey)});`;
+    });
+    const statementLines = renderStatements(statements, 4, moduleContext);
+
+    return [
+        `function ${functionName}(${parameters}) {`,
+        ...declarationLines,
+        "",
+        ...statementLines,
+        "",
+        `    return {`,
+        ...declarations.map((declaration) => `        ${declaration.name},`),
+        `    };`,
+        `}`,
+    ].join("\n");
+}
+
 function renderTopJavaScript(filePath) {
-    const { source } = loadFile(filePath);
-    const topModule = extractBlocks(source, "module", { allowParameters: true })
-        .find((module) => module.name === "top");
+    const { source, modules } = loadFile(filePath);
+    const topModule = modules.get("top");
     if (!topModule) {
         throw new Error("No top module found");
     }
 
-    const statements = splitStatements(topModule.body);
-    const { declarations, nameOverrides } = collectTopDeclarations(statements);
     const inputDir = path.dirname(filePath);
     const includes = includedFiles(filePath);
     const requireLines = includes.map((includePath) => {
@@ -1736,21 +2440,9 @@ function renderTopJavaScript(filePath) {
         const relativePath = `./${path.relative(inputDir, includePath).replace(/\\/g, "/").replace(/\.js$/, "")}`;
         return `const ${name} = require(${jsString(relativePath)});`;
     });
-    const declarationLines = declarations.map((declaration) => {
-        if (declaration.kind === "net") {
-            const finalName = nameOverrides.get(declaration.name) || declaration.defaultName;
-            return `    const ${declaration.name} = __declareNet(${jsString(declaration.name)}, ${jsString(finalName)}, ${nameOverrides.has(declaration.name)});`;
-        }
-
-        const highKey = `${declaration.name}.h`;
-        const lowKey = `${declaration.name}.l`;
-        return `    const ${declaration.name} = __declareRail(${jsString(declaration.name)}, ${jsString(nameOverrides.get(highKey) || declaration.defaultHigh)}, ${jsString(nameOverrides.get(lowKey) || declaration.defaultLow)}, ${nameOverrides.has(highKey)}, ${nameOverrides.has(lowKey)});`;
-    });
-    const renderContext = {
-        netNames: new Set(declarations.filter((declaration) => declaration.kind === "net").map((declaration) => declaration.name)),
-        railNames: new Set(declarations.filter((declaration) => declaration.kind === "rail").map((declaration) => declaration.name)),
-    };
-    const statementLines = renderStatements(statements, 4, renderContext);
+    const moduleDefinitions = [...modules.values()]
+        .filter((module) => module.name !== "top")
+        .map((module) => renderModuleJavaScript(module, {}));
 
     return [
         ...requireLines,
@@ -1760,10 +2452,11 @@ function renderTopJavaScript(filePath) {
         "function top() {",
         renderRuntimeHelpers().trimEnd(),
         "",
-        ...declarationLines,
+        ...moduleDefinitions.map((module) => indentLines(module, 4)),
+        moduleDefinitions.length ? "" : undefined,
+        indentLines(renderModuleJavaScript(topModule, {}, "__module_top"), 4),
         "",
-        ...statementLines,
-        "",
+        "    __module_top();",
         "    return __finalize();",
         "}",
         "",
@@ -1869,7 +2562,12 @@ async function main() {
         progress.succeed("Compiled nets");
 
         progress.start("Fetching components");
-        const bom = await step3(inputPath, compiled, { noPartsLock });
+        const bom = await step3(inputPath, compiled, {
+            noPartsLock,
+            onProgress({ current, total }) {
+                progress.update(`Fetching components (${current}/${total})`);
+            },
+        });
         progress.succeed("Fetched components");
 
         progress.start("Sending to KiCad");

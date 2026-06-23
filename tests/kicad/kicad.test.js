@@ -53,6 +53,36 @@ const symbolFile = `(kicad_symbol_lib (version 20211014) (generator Schrune)
 )
 `;
 
+const compactSymbolFile = `(kicad_symbol_lib (version 20251024) (generator "Schrune") (generator_version "10.0") (symbol "TestPart" (pin_names (offset 1.016)) (in_bom yes) (on_board yes)
+  (property "Reference" "U?" (at 0 5.08 0)
+    (effects (font (size 1.27 1.27)))
+  )
+  (property "Value" "TestPart" (at 0 -5.08 0)
+    (effects (font (size 1.27 1.27)))
+  )
+  (property "Footprint" "./TestPart.kicad_mod" (at 0 -7.62 0)
+    (effects (font (size 1.27 1.27)) hide)
+  )
+  (property "Datasheet" "" (at 0 0 0)
+    (effects (font (size 1.27 1.27)) hide)
+  )
+  (symbol "TestPart_0_1"
+    (rectangle (start -5.08 2.54) (end 5.08 -2.54)
+      (stroke (width 0.254) (type default))
+      (fill (type background))
+    )
+    (pin passive line (at -7.62 1.27 0) (length 2.54)
+      (name "IN" (effects (font (size 1.27 1.27))))
+      (number "1" (effects (font (size 1.27 1.27))))
+    )
+    (pin passive line (at 7.62 -1.27 180) (length 2.54)
+      (name "GND" (effects (font (size 1.27 1.27))))
+      (number "2" (effects (font (size 1.27 1.27))))
+    )
+  )
+))
+`;
+
 const footprintFile = `(footprint "TestPart" (version 20221018) (generator Schrune)
   (attr smd)
   (fp_text reference "REF**" (at 0 -2 0) (layer "F.SilkS")
@@ -133,6 +163,31 @@ test("writes KiCad project, schematic, and PCB files", () => {
     }
 });
 
+test("loads compact KiCad symbol libraries across format variations", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-kicad-compact-"));
+    const partsDir = path.join(dir, "parts", "TestPart");
+    fs.mkdirSync(partsDir, { recursive: true });
+    fs.writeFileSync(path.join(partsDir, "TestPart.schrune"), partFile);
+    fs.writeFileSync(path.join(partsDir, "TestPart.kicad_sym"), compactSymbolFile);
+    fs.writeFileSync(path.join(partsDir, "TestPart.kicad_mod"), footprintFile);
+    const filePath = path.join(dir, "fixture.schrune");
+    fs.writeFileSync(filePath, `#include "TestPart.schrune"
+
+module top () {
+    part u = new TestPart();
+}
+`);
+
+    try {
+        const compiled = assignDesignators(step1(filePath));
+        const result = writeKiCadFiles(filePath, compiled);
+        assert.equal(fs.existsSync(result.schematicPath), true);
+        assert.equal(fs.existsSync(result.pcbPath), true);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 test("uses net labels for rail nets instead of power symbols", () => {
     const fixture = makeFixture();
     try {
@@ -207,6 +262,44 @@ test("throws a build error when a KiCad asset is missing", () => {
     try {
         const compiled = assignDesignators(step1(fixture.filePath));
         assert.throws(() => writeKiCadFiles(fixture.filePath, compiled), /U1 is missing a \.kicad_sym asset/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("writes module components on separate schematic sheets", () => {
+    const fixture = makeFixture();
+    try {
+        fs.writeFileSync(fixture.filePath, `#include "TestPart.schrune"
+
+module child () {
+    rail power;
+    part u = new TestPart();
+    u.IN ~ power.h;
+    u.GND ~ power.l;
+}
+
+module top () {
+    rail board_power;
+    mod c = new child();
+    c.power ~ board_power;
+}
+`);
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled);
+
+        assert.equal(fs.existsSync(result.moduleSchematicPaths.c), true);
+
+        const rootSchematic = fs.readFileSync(result.schematicPath, "utf8");
+        assert.match(rootSchematic, /\(sheet \(at /);
+        assert.match(rootSchematic, /\(property "Sheetname" "c"/);
+        assert.match(rootSchematic, /\(property "Sheetfile" "fixture_c\.kicad_sch"/);
+        assert.doesNotMatch(rootSchematic, /\(symbol \(lib_id "TestPart"\)/);
+
+        const childSchematic = fs.readFileSync(result.moduleSchematicPaths.c, "utf8");
+        assert.match(childSchematic, /\(symbol \(lib_id "TestPart"\)/);
+        assert.match(childSchematic, /\(global_label "board_power_h"/);
+        assert.match(childSchematic, /\(global_label "board_power_l"/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
