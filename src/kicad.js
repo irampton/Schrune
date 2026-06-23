@@ -103,36 +103,36 @@ function resolveAsset(filePath, component, extension, infoKey) {
 }
 
 function flattenPins(value, pins = [], seen = new Set()) {
-    if (!value) {
+    if (!value || typeof value !== "object" || seen.has(value)) {
         return pins;
     }
 
     if (value.pad !== undefined && value.name !== undefined) {
-        if (!seen.has(value)) {
-            seen.add(value);
-            pins.push(value);
-        }
+        seen.add(value);
+        pins.push(value);
         return pins;
     }
+
+    seen.add(value);
 
     if (Array.isArray(value)) {
         for (const entry of value) {
             flattenPins(entry, pins, seen);
         }
+    }
+
+    if (Array.isArray(value.group)) {
+        flattenPins(value.group, pins, seen);
         return pins;
     }
 
-    if (typeof value === "object") {
-        if (Array.isArray(value.group)) {
-            flattenPins(value.group, pins, seen);
-            return pins;
+    for (const key of Object.keys(value)) {
+        if (key.startsWith("__")) {
+            continue;
         }
-
-        for (const key of Object.keys(value)) {
-            const child = value[key];
-            if (child && typeof child === "object") {
-                flattenPins(child, pins, seen);
-            }
+        const child = value[key];
+        if (child && typeof child === "object") {
+            flattenPins(child, pins, seen);
         }
     }
 
@@ -546,7 +546,7 @@ function renderSchematic(filePath, compiled, assets, placements, options = {}) {
             const padNumber = physicalPadNumber(component, pin, index);
             const symbolPin = symbolPins.get(padNumber);
             if (!symbolPin) {
-                throw new Error(`${component.designator} pin ${padNumber} is missing from ${asset.symbolPath}`);
+                continue;
             }
             const point = pinEnd(placement, symbolPin);
             connections.push(renderNetConnection(projectName, component, pin.net, point, {
