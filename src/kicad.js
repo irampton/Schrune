@@ -64,7 +64,7 @@ function candidateAssetNames(component, extension, infoKey) {
         names.add(path.basename(info[infoKey]));
     }
 
-    for (const value of [info.partNumber, selected.mpn, componentKind(component)]) {
+    for (const value of [info.partNumber, selected.mpn, selected.partName, componentKind(component)]) {
         if (value) {
             names.add(`${sanitizeIdentifier(value)}${extension}`);
         }
