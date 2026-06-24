@@ -35,7 +35,108 @@ function componentSignature(component) {
     });
 }
 
-function assignDesignators(stepResult, lock = {}) {
+function componentIdentity(component) {
+    const schrune = component.__schrune || {};
+    const modulePath = Array.isArray(schrune.modulePath) ? schrune.modulePath.join(".") : "";
+    const name = schrune.name || "";
+    const arrayIndex = schrune.arrayIndex === undefined || schrune.arrayIndex === null ? "" : String(schrune.arrayIndex);
+    const identity = [modulePath, name, arrayIndex].join("\0");
+    return identity.trim() ? identity : undefined;
+}
+
+function designatorStatePathFor(filePath) {
+    return path.join(path.dirname(filePath), "KiCad", ".schrune-designators.json");
+}
+
+function normalizeDesignatorAssignments(assignments = {}) {
+    const normalized = {};
+    for (const [key, value] of Object.entries(assignments)) {
+        if (Array.isArray(value)) {
+            const cleaned = value.map((entry) => String(entry || "").trim()).filter(Boolean);
+            if (cleaned.length) {
+                normalized[key] = cleaned;
+            }
+            continue;
+        }
+
+        const text = String(value || "").trim();
+        if (text) {
+            normalized[key] = [text];
+        }
+    }
+    return normalized;
+}
+
+function normalizeDesignatorState(state = {}) {
+    return {
+        version: LOCK_VERSION,
+        assignments: normalizeDesignatorAssignments(state.assignments || state),
+    };
+}
+
+function readDesignatorState(filePath) {
+    const statePath = designatorStatePathFor(filePath);
+    if (!fs.existsSync(statePath)) {
+        return { version: LOCK_VERSION, assignments: {} };
+    }
+
+    return normalizeDesignatorState(JSON.parse(fs.readFileSync(statePath, "utf8")));
+}
+
+function writeDesignatorState(filePath, state) {
+    const statePath = designatorStatePathFor(filePath);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, `${JSON.stringify(normalizeDesignatorState(state), null, 2)}\n`);
+}
+
+function designatorStateKey(component) {
+    const identity = componentIdentity(component);
+    return identity ? `${designatorPrefix(component)}\0id:${identity}` : `${designatorPrefix(component)}\0sig:${componentSignature(component)}`;
+}
+
+function designatorStateLookupKeys(component) {
+    const prefix = designatorPrefix(component);
+    const keys = [];
+    const identity = componentIdentity(component);
+    if (identity) {
+        keys.push(`${prefix}\0id:${identity}`);
+    }
+    keys.push(`${prefix}\0sig:${componentSignature(component)}`);
+    return keys;
+}
+
+function parseDesignator(designator) {
+    const match = String(designator || "").match(/^([A-Za-z_]+)(\d+)$/);
+    if (!match) {
+        return undefined;
+    }
+
+    return {
+        prefix: match[1],
+        number: Number(match[2]),
+    };
+}
+
+function buildDesignatorState(stepResult) {
+    const assignments = {};
+    for (const component of stepResult.components) {
+        if (!component.designator) {
+            continue;
+        }
+        const key = designatorStateKey(component);
+        if (!assignments[key]) {
+            assignments[key] = [];
+        }
+        assignments[key].push(component.designator);
+    }
+    return {
+        version: LOCK_VERSION,
+        assignments,
+    };
+}
+
+function assignDesignators(stepResult, state = {}) {
+    const normalizedState = normalizeDesignatorState(state);
     const usedByPrefix = new Map();
 
     const components = stepResult.components.map((component, index) => {
@@ -54,23 +155,73 @@ function assignDesignators(stepResult, lock = {}) {
         return leftKey.localeCompare(rightKey);
     });
 
+    const grouped = new Map();
     for (const component of components) {
-        const prefix = designatorPrefix(component);
+        const key = designatorStateKey(component);
+        if (!grouped.has(key)) {
+            grouped.set(key, []);
+        }
+        grouped.get(key).push(component);
+    }
+
+    for (const [key, group] of grouped.entries()) {
+        const prefix = designatorPrefix(group[0]);
         if (!usedByPrefix.has(prefix)) {
             usedByPrefix.set(prefix, new Set());
         }
+
         const used = usedByPrefix.get(prefix);
-        let number = 1;
-        while (used.has(number)) {
-            number++;
+        const previous = designatorStateLookupKeys(group[0])
+            .flatMap((lookupKey) => normalizedState.assignments[lookupKey] || [])
+            .filter((designator, index, list) => list.indexOf(designator) === index);
+        for (const designator of previous) {
+            const parsed = parseDesignator(designator);
+            if (parsed && parsed.prefix === prefix) {
+                used.add(parsed.number);
+            }
         }
-        used.add(number);
-        component.designator = `${prefix}${number}`;
+    }
+
+    for (const [key, group] of grouped.entries()) {
+        const prefix = designatorPrefix(group[0]);
+        const used = usedByPrefix.get(prefix);
+        const previous = designatorStateLookupKeys(group[0])
+            .flatMap((lookupKey) => normalizedState.assignments[lookupKey] || [])
+            .filter((designator, index, list) => list.indexOf(designator) === index);
+
+        for (let index = 0; index < group.length; index++) {
+            const component = group[index];
+            const previousDesignator = previous[index];
+            const parsed = parseDesignator(previousDesignator);
+
+            if (parsed && parsed.prefix === prefix) {
+                component.designator = previousDesignator;
+                used.add(parsed.number);
+                continue;
+            }
+
+            let number = 1;
+            while (used.has(number)) {
+                number++;
+            }
+
+            used.add(number);
+            component.designator = `${prefix}${number}`;
+        }
+    }
+
+    const nextState = buildDesignatorState({ components });
+
+    for (const component of components) {
+        if (!component.designator) {
+            throw new Error("Failed to assign designator");
+        }
     }
 
     return {
         ...stepResult,
         components: components.sort((left, right) => left.__schrune.index - right.__schrune.index),
+        designatorState: nextState,
     };
 }
 
@@ -600,12 +751,17 @@ async function step3(filePath, compiled, options = {}) {
 module.exports = {
     assignDesignators,
     bomCsv,
+    buildDesignatorState,
     componentFilters,
     componentSignature,
+    designatorStatePathFor,
     lockPathFor,
     makeBomRows,
+    normalizeDesignatorState,
     readPartsLock,
+    readDesignatorState,
     resolveGenericParts,
     step3,
+    writeDesignatorState,
     writeBomCsv,
 };

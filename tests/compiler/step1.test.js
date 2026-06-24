@@ -229,6 +229,26 @@ module top () {
     });
 });
 
+test("keeps late rail renames on chained connections", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module top () {
+    rail VIN;
+    rail power_3v3;
+    rail power_5v;
+    VIN.l ~ power_3v3.l ~ power_5v.l;
+    power_3v3.l.name = "GND";
+}
+`, (filePath) => {
+        const result = step1(filePath);
+
+        assert.equal(result.nets.VIN.l, "GND");
+        assert.equal(result.nets.power_3v3.l, "GND");
+        assert.equal(result.nets.power_5v.l, "GND");
+        assert.equal(result.nets.VIN.h, "VIN_h");
+    });
+});
+
 test("declares and connects nets with inline multi-tie shorthand", () => {
     withFixture(`#include "TestPart.schrune"
 

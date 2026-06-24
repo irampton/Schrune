@@ -213,6 +213,11 @@ order. A signature includes:
 
 New designators use the lowest unused number for each prefix.
 
+To keep references stable across rebuilds when the component set changes, the
+compiler also writes a hidden designator cache under
+`KiCad/.schrune-designators.json` and reuses it on the next build when
+possible.
+
 ## Step 3 - Generate BOM
 
 Fill out generic components, generate a BOM, and prepare to make a schematic.
@@ -304,6 +309,10 @@ KiCad/{filename}.kicad_pro
 KiCad/{filename}.kicad_sch
 KiCad/{filename}.kicad_pcb
 ```
+
+If the PCB file already exists, Schrune leaves it untouched and only rewrites
+the schematic files. That lets you use KiCad's "Update PCB from Schematic"
+workflow after a rebuild.
 
 The schematic embeds each imported symbol definition, places each component on a
 grid, then connects every connected pin to a short wire and a net label with the

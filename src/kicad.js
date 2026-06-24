@@ -10,6 +10,7 @@ const PIN_LABEL_LENGTH = 5.08;
 const KICAD_GENERATOR_VERSION = "10.0";
 const KICAD_SCH_VERSION = 20260306;
 const KICAD_PCB_VERSION = 20260206;
+const FOOTPRINT_LIBRARY_NAME = "Schrune";
 
 function componentKind(component) {
     return component.constructor && component.constructor.name || "Component";
@@ -274,6 +275,17 @@ function extractSymbol(symbolText) {
     };
 }
 
+function extractFootprintName(footprintText) {
+    const trimmed = footprintText.trim();
+    const firstLine = trimmed.split(/\r?\n/, 1)[0];
+    const nameMatch = firstLine.match(/^\(footprint\s+"([^"]+)"/) || firstLine.match(/^\(module\s+([^\s)]+)/);
+    if (!nameMatch) {
+        throw new Error("KiCad footprint file does not contain a footprint");
+    }
+
+    return nameMatch[1];
+}
+
 function parseSymbolPins(symbolSource) {
     const pins = new Map();
     const pinPattern = /\(pin\b/g;
@@ -467,7 +479,6 @@ function renderSchematicProperty(_projectName, _component, name, value, x, y, op
 }
 
 function renderSchematicSymbol(component, symbol, placement, projectName) {
-    const footprintName = path.basename(symbol.footprintPath, ".kicad_mod");
     const pinLines = [...symbol.pins.keys()]
         .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
         .map((pinNumber) => `    (pin ${kicadString(pinNumber)} (uuid ${kicadId(`${projectName}:sch:${component.designator}:pin:${pinNumber}`)}))`);
@@ -477,7 +488,7 @@ function renderSchematicSymbol(component, symbol, placement, projectName) {
         `    (uuid ${kicadId(`${projectName}:sch:${component.designator}`)})`,
         renderSchematicProperty(projectName, component, "Reference", component.designator, placement.x, placement.y - 5.08),
         renderSchematicProperty(projectName, component, "Value", component.value || component.info.partNumber || componentKind(component), placement.x, placement.y + 5.08),
-        renderSchematicProperty(projectName, component, "Footprint", `Schrune:${footprintName}`, placement.x, placement.y + 7.62, { hide: true }),
+        renderSchematicProperty(projectName, component, "Footprint", `${FOOTPRINT_LIBRARY_NAME}:${symbol.footprintName}`, placement.x, placement.y + 7.62, { hide: true }),
         ...pinLines,
         `    (instances`,
         `      (project ${kicadString(projectName)}`,
@@ -576,15 +587,10 @@ function renderSchematic(filePath, compiled, assets, placements, options = {}) {
 
 function transformFootprintForBoard(component, asset, placement, netNumbers, projectName) {
     const raw = fs.readFileSync(asset.footprintPath, "utf8").trim();
-    const openEnd = raw.indexOf("\n");
-    const firstLine = openEnd === -1 ? raw : raw.slice(0, openEnd);
-    const name = firstLine.match(/^\(footprint\s+"([^"]+)"/)
-        || firstLine.match(/^\(module\s+([^\s)]+)/);
-    if (!name) {
-        throw new Error(`Invalid KiCad footprint: ${asset.footprintPath}`);
-    }
+    extractFootprintName(raw);
 
     const valueText = component.value || component.info.partNumber || componentKind(component);
+    const openEnd = raw.indexOf("\n");
     let body = openEnd === -1 ? "" : raw.slice(openEnd + 1, -1).trimEnd();
     body = replaceFootprintText(body, "reference", component.designator);
     body = replaceFootprintText(body, "value", valueText);
@@ -595,7 +601,7 @@ function transformFootprintForBoard(component, asset, placement, netNumbers, pro
 
     const indentedBody = body.split("\n").map((line) => `    ${line}`).join("\n");
     return [
-        `  (footprint ${kicadString(`Schrune:${name[1]}`)} (layer "F.Cu")`,
+        `  (footprint ${kicadString(`${FOOTPRINT_LIBRARY_NAME}:${asset.footprintName}`)} (layer "F.Cu")`,
         `    (uuid ${kicadId(`${projectName}:pcb:${component.designator}`)})`,
         `    (at ${(placement.x * 1.25).toFixed(2)} ${(placement.y * 1.25).toFixed(2)} 0)`,
         `    (property "Reference" ${kicadString(component.designator)})`,
@@ -603,6 +609,40 @@ function transformFootprintForBoard(component, asset, placement, netNumbers, pro
         indentedBody,
         `  )`,
     ].join("\n");
+}
+
+function renderFootprintLibraryTable() {
+    return [
+        `(fp_lib_table`,
+        `  (lib (name ${kicadString(FOOTPRINT_LIBRARY_NAME)})`,
+        `    (type "KiCad")`,
+        `    (uri "\${KIPRJMOD}/${FOOTPRINT_LIBRARY_NAME}.pretty")`,
+        `    (options "")`,
+        `    (descr "Project-local Schrune footprint library")`,
+        `  )`,
+        `)`,
+        "",
+    ].join("\n");
+}
+
+function writeFootprintLibrary(outputDir, assets) {
+    const libraryDir = path.join(outputDir, `${FOOTPRINT_LIBRARY_NAME}.pretty`);
+    fs.rmSync(libraryDir, { recursive: true, force: true });
+    fs.mkdirSync(libraryDir, { recursive: true });
+
+    const written = new Map();
+    for (const asset of assets.values()) {
+        const targetPath = path.join(libraryDir, `${asset.footprintName}.kicad_mod`);
+        const source = fs.readFileSync(asset.footprintPath, "utf8");
+        const existing = written.get(targetPath);
+        if (existing !== undefined && existing !== source) {
+            throw new Error(`Conflicting footprint library entry "${asset.footprintName}"`);
+        }
+        fs.writeFileSync(targetPath, source);
+        written.set(targetPath, source);
+    }
+
+    return libraryDir;
 }
 
 function replaceFootprintText(source, type, text) {
@@ -663,9 +703,15 @@ function addPadNets(source, pinNetByPad, netNumbers) {
         const closeIndex = findMatching(source, openIndex);
         const padSource = source.slice(openIndex, closeIndex + 1);
         const netName = pinNetByPad.get(String(match[1] || match[2]));
-        const nextPadSource = netName && !/\(net\s+\d+\s+"[^"]*"\)/.test(padSource)
-            ? `${padSource.slice(0, -1)} (net ${netNumbers.get(netName)} ${kicadString(netName)}))`
-            : padSource;
+        let nextPadSource = padSource;
+        if (netName) {
+            const nextNetSource = `(net ${netNumbers.get(netName)} ${kicadString(netName)})`;
+            if (/\(net\s+\d+\s+"[^"]*"\)/.test(nextPadSource)) {
+                nextPadSource = nextPadSource.replace(/\(net\s+\d+\s+"[^"]*"\)/, nextNetSource);
+            } else {
+                nextPadSource = `${nextPadSource.slice(0, -1)} ${nextNetSource})`;
+            }
+        }
 
         output += source.slice(cursor, openIndex);
         output += nextPadSource;
@@ -681,7 +727,8 @@ function renderPcb(filePath, compiled, assets, placements) {
     const netNames = netNamesFor(compiled);
     const netNumbers = new Map(netNames.map((netName, index) => [netName, index + 1]));
     const footprints = compiled.components.map((component) => {
-        return transformFootprintForBoard(component, assets.get(component), placements.get(component), netNumbers, projectName);
+        const placement = placements.get(component);
+        return transformFootprintForBoard(component, assets.get(component), placement, netNumbers, projectName);
     });
 
     return [
@@ -723,12 +770,36 @@ function renderProject(projectName) {
                 defaults: {},
             },
         },
+        boards: [{
+            filename: `${projectName}.kicad_pcb`,
+            name: projectName,
+            uuid: "00000000-0000-0000-0000-000000000000",
+        }],
         meta: {
             filename: `${projectName}.kicad_pro`,
             version: 1,
         },
         net_settings: {
             classes: [],
+        },
+        schematic: {
+            annotate_start_num: 0,
+            bom_export_filename: "${PROJECTNAME}.csv",
+            meta: {
+                version: 1,
+            },
+            page_layout_descr_file: "",
+            plot_directory: "",
+            reuse_designators: true,
+            subpart_first_id: 65,
+            subpart_id_separator: 0,
+            top_level_sheets: [{
+                filename: `${projectName}.kicad_sch`,
+                name: projectName,
+                uuid: "00000000-0000-0000-0000-000000000000",
+            }],
+            used_designators: "",
+            variants: [],
         },
     }, null, 2)}\n`;
 }
@@ -742,6 +813,7 @@ function collectAssets(filePath, compiled) {
         const extracted = extractSymbol(fs.readFileSync(symbolPath, "utf8"));
         assets.set(component, {
             ...extracted,
+            footprintName: path.basename(footprintPath, ".kicad_mod"),
             symbolPath,
             footprintPath,
             pins: parseSymbolPins(extracted.source),
@@ -758,7 +830,7 @@ function writeKiCadFiles(filePath, compiled) {
     const schematicPath = path.join(outputDir, `${projectName}.kicad_sch`);
     const pcbPath = path.join(outputDir, `${projectName}.kicad_pcb`);
     const assets = collectAssets(filePath, compiled);
-    const placements = componentPlacement(compiled);
+    const schematicPlacements = componentPlacement(compiled);
     const moduleGroups = new Map();
     for (const component of compiled.components) {
         const moduleName = component.__schrune && component.__schrune.moduleName;
@@ -780,14 +852,16 @@ function writeKiCadFiles(filePath, compiled) {
         y: START_Y + index * 22.86,
     }));
     const moduleSchematicPaths = {};
+    const footprintLibraryPath = writeFootprintLibrary(outputDir, assets);
 
     fs.mkdirSync(outputDir, { recursive: true });
     fs.writeFileSync(projectPath, renderProject(projectName));
+    fs.writeFileSync(path.join(outputDir, "fp-lib-table"), renderFootprintLibraryTable());
     fs.writeFileSync(schematicPath, renderSchematic(
         filePath,
         { ...compiled, components: rootComponents },
         assets,
-        placements,
+        schematicPlacements,
         {
             globalLabels: hasModuleSheets,
             sheetEntries: sheetEntries.map((entry) => renderSheetEntry(projectName, entry.name, entry.file, entry.x, entry.y)),
@@ -801,19 +875,22 @@ function writeKiCadFiles(filePath, compiled) {
             filePath,
             { ...compiled, components: moduleComponents },
             assets,
-            placements,
+            schematicPlacements,
             { globalLabels: true }
         ));
         moduleSchematicPaths[entry.name] = modulePath;
     }
 
-    fs.writeFileSync(pcbPath, renderPcb(filePath, compiled, assets, placements));
+    if (!fs.existsSync(pcbPath)) {
+        fs.writeFileSync(pcbPath, renderPcb(filePath, compiled, assets, componentPlacement(compiled)));
+    }
 
     return {
         ...compiled,
         kicadDir: outputDir,
         kicadProjectPath: projectPath,
         schematicPath,
+        footprintLibraryPath,
         moduleSchematicPaths,
         pcbPath,
     };

@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { assignDesignators, step1, step3 } = require("../../src/app");
+const { assignDesignators, buildDesignatorState, step1, step3 } = require("../../src/app");
 const { bomCsv, lockPathFor, makeBomRows, readPartsLock } = require("../../src/bom");
 
 function makeFixture(source) {
@@ -65,6 +65,23 @@ test("primitive components keep selection fields", () => {
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
+});
+
+test("assignDesignators reuses a prior designator state when components move around", () => {
+    const initial = assignDesignators(step1(`module top () {
+    a = new Resistor(value = "10k", footprint = "0603");
+}
+`));
+    const designatorState = buildDesignatorState(initial);
+    const rebuilt = assignDesignators(step1(`module top () {
+    b = new Resistor(value = "1k", footprint = "0603");
+    a = new Resistor(value = "10k", footprint = "0603");
+}
+`), designatorState);
+
+    const byValue = new Map(rebuilt.components.map((component) => [component.value, component.designator]));
+    assert.equal(byValue.get("10k"), "R1");
+    assert.equal(byValue.get("1k"), "R2");
 });
 
 test("step3 reuses parts-lock entries and writes BOM csv", async () => {

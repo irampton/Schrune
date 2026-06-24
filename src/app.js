@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { addLcscPart } = require("./lcsc");
-const { assignDesignators, step3 } = require("./bom");
+const { assignDesignators, buildDesignatorState, readDesignatorState, step3, writeDesignatorState } = require("./bom");
 const { writeKiCadFiles } = require("./kicad");
 
 const ANSI = {
@@ -1041,6 +1041,10 @@ function getNetValue(expression, nets, modulesByName) {
 }
 
 function connectNetBindings(left, right, leftExpression, rightExpression, nameOverrides, netAliases = new Map()) {
+    function resolvedName(expression, binding) {
+        return nameOverrides.get(expression.trim()) || netRefName(rootNetRef(binding.value));
+    }
+
     if (isNetGroup(left.value) || isNetGroup(right.value)) {
         if (!isNetGroup(left.value) || !isNetGroup(right.value)) {
             throw new Error(`Connection joins net group and net "${leftExpression} ~ ${rightExpression}"`);
@@ -1091,28 +1095,32 @@ function connectNetBindings(left, right, leftExpression, rightExpression, nameOv
         return;
     }
 
-    const leftName = netRefName(left.value);
-    const rightName = netRefName(right.value);
+    const leftRoot = rootNetRef(left.value);
+    const rightRoot = rootNetRef(right.value);
+    const leftName = netRefName(leftRoot);
+    const rightName = netRefName(rightRoot);
 
     if (leftName === rightName) {
         return;
     }
 
-    const leftNamed = nameOverrides.has(leftExpression.trim()) || (isNetRef(left.value) && left.value.isOverride);
-    const rightNamed = nameOverrides.has(rightExpression.trim()) || (isNetRef(right.value) && right.value.isOverride);
+    const leftNamed = nameOverrides.has(leftExpression.trim()) || (isNetRef(leftRoot) && leftRoot.isOverride);
+    const rightNamed = nameOverrides.has(rightExpression.trim()) || (isNetRef(rightRoot) && rightRoot.isOverride);
+    const leftResolvedName = resolvedName(leftExpression, left);
+    const rightResolvedName = resolvedName(rightExpression, right);
 
     if (leftNamed && rightNamed) {
-        throw new Error(`Connection joins nets "${leftName}" and "${rightName}"`);
+        throw new Error(`Connection joins nets "${leftResolvedName}" and "${rightResolvedName}"`);
     }
 
     if (leftNamed) {
-        netAliases.set(rightName, leftName);
-        right.set(left.value);
+        netAliases.set(rightResolvedName, leftResolvedName);
+        right.set(leftRoot);
         return;
     }
 
-    netAliases.set(leftName, rightName);
-    left.set(right.value);
+    netAliases.set(leftResolvedName, rightResolvedName);
+    left.set(rightRoot);
 }
 
 function resolveNetConnection(leftExpression, rightExpression, nets, nameOverrides, modulesByName, netAliases) {
@@ -1846,6 +1854,13 @@ function isRailValue(value) {
 
 function netRefName(value) {
     return isNetRef(value) ? value.value : value;
+}
+
+function rootNetRef(value) {
+    while (isNetRef(value) && value.aliasOf) {
+        value = value.aliasOf;
+    }
+    return value;
 }
 
 function collectNetRefs(value, refs = [], seen = new Set()) {
@@ -2700,6 +2715,10 @@ function renderRuntimeHelpers() {
         `        return ref;\n` +
         `    }\n` +
         `\n` +
+        `    function __isNamedNetRef(ref) {\n` +
+        `        return Boolean(__rootNetRef(ref).isOverride);\n` +
+        `    }\n` +
+        `\n` +
         `    function __pin(component, path, defaultNetName) {\n` +
         `        let pin = component.pins;\n` +
         `        for (const part of path) {\n` +
@@ -2812,20 +2831,22 @@ function renderRuntimeHelpers() {
         `                __connect(__net(left.ref.l), __net(right.ref.l));\n` +
         `                return;\n` +
         `            }\n` +
-        `            if (left.ref.value === right.ref.value) {\n` +
+        `            const leftRoot = __rootNetRef(left.ref);\n` +
+        `            const rightRoot = __rootNetRef(right.ref);\n` +
+        `            if (leftRoot.value === rightRoot.value) {\n` +
         `                return;\n` +
         `            }\n` +
-        `            if (left.ref.isOverride && right.ref.isOverride) {\n` +
-        `                throw new Error(\`Connection joins nets "\${left.ref.value}" and "\${right.ref.value}"\`);\n` +
+        `            if (__isNamedNetRef(left.ref) && __isNamedNetRef(right.ref)) {\n` +
+        `                throw new Error(\`Connection joins nets "\${leftRoot.value}" and "\${rightRoot.value}"\`);\n` +
         `            }\n` +
-        `            if (left.ref.isOverride) {\n` +
-        `                netAliases.set(right.ref.value, left.ref.value);\n` +
-        `                right.ref.value = left.ref.value;\n` +
-        `                right.ref.aliasOf = __rootNetRef(left.ref);\n` +
+        `            if (__isNamedNetRef(left.ref)) {\n` +
+        `                netAliases.set(rightRoot.value, leftRoot.value);\n` +
+        `                right.ref.value = leftRoot.value;\n` +
+        `                right.ref.aliasOf = leftRoot;\n` +
         `            } else {\n` +
-        `                netAliases.set(left.ref.value, right.ref.value);\n` +
-        `                left.ref.value = right.ref.value;\n` +
-        `                left.ref.aliasOf = __rootNetRef(right.ref);\n` +
+        `                netAliases.set(leftRoot.value, rightRoot.value);\n` +
+        `                left.ref.value = rightRoot.value;\n` +
+        `                left.ref.aliasOf = rightRoot;\n` +
         `            }\n` +
         `            return;\n` +
         `        }\n` +
@@ -3166,6 +3187,7 @@ async function main() {
         throw new Error(`File not found: ${inputFile}`);
     }
 
+    const designatorState = readDesignatorState(inputPath);
     const progress = createProgress();
 
     try {
@@ -3180,7 +3202,7 @@ async function main() {
         progress.succeed("Parsed source");
 
         progress.start("Compiling nets");
-        const compiled = assignDesignators(parsed);
+        const compiled = assignDesignators(parsed, designatorState);
         progress.succeed("Compiled nets");
 
         progress.start("Fetching components");
@@ -3195,6 +3217,8 @@ async function main() {
         progress.start("Sending to KiCad");
         const result = writeKiCadFiles(inputPath, bom);
         progress.succeed("Sent to KiCad");
+
+        writeDesignatorState(inputPath, buildDesignatorState(result));
 
         console.log(colorize(`Build successful: ${result.components.length} components, ${result.netList.size} nets.`, "green", process.stdout));
     } catch (error) {
@@ -3218,9 +3242,12 @@ if (require.main === module) {
 
 module.exports = {
     assignDesignators,
+    buildDesignatorState,
+    readDesignatorState,
     step1,
     step3,
     writeKiCadFiles,
+    writeDesignatorState,
     materializeStep1JavaScript,
     createProgress,
     UsageError,

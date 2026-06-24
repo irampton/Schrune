@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { assignDesignators, step1, writeKiCadFiles } = require("../../src/app");
+const { assignDesignators, buildDesignatorState, step1, writeKiCadFiles } = require("../../src/app");
 
 const partFile = `part TestPart {
     info: {
@@ -129,6 +129,18 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.equal(fs.existsSync(result.kicadProjectPath), true);
         assert.equal(fs.existsSync(result.schematicPath), true);
         assert.equal(fs.existsSync(result.pcbPath), true);
+        assert.equal(fs.existsSync(path.join(result.kicadDir, "fp-lib-table")), true);
+        assert.equal(fs.existsSync(result.footprintLibraryPath), true);
+        assert.equal(fs.existsSync(path.join(result.footprintLibraryPath, "TestPart.kicad_mod")), true);
+
+        const project = fs.readFileSync(result.kicadProjectPath, "utf8");
+        assert.match(project, /"boards": \[\s*\{\s*"filename": "fixture\.kicad_pcb"/s);
+        assert.match(project, /"top_level_sheets": \[\s*\{\s*"filename": "fixture\.kicad_sch"/s);
+
+        const fpLibTable = fs.readFileSync(path.join(result.kicadDir, "fp-lib-table"), "utf8");
+        assert.match(fpLibTable, /\(fp_lib_table/);
+        assert.match(fpLibTable, /\(lib \(name "Schrune"\)/);
+        assert.match(fpLibTable, /\(uri "\$\{KIPRJMOD}\/Schrune\.pretty"\)/);
 
         const schematic = fs.readFileSync(result.schematicPath, "utf8");
         assert.match(schematic, /\(kicad_sch \(version 20260306\) \(generator "Schrune"\) \(generator_version "10\.0"\)/);
@@ -340,6 +352,87 @@ module top () {
         assert.match(childSchematic, /\(symbol \(lib_id "TestPart"\)/);
         assert.match(childSchematic, /\(global_label "board_power_h"/);
         assert.match(childSchematic, /\(global_label "board_power_l"/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("leaves an existing PCB untouched while updating the schematic and designators", () => {
+    const fixture = makeFixture();
+    try {
+        const earlierPart = `part EarlierPart {
+    info: {
+        partNumber: "EarlierPart",
+        manufacture: "TestCo",
+        footprint: "./EarlierPart.kicad_mod",
+        symbol: "./EarlierPart.kicad_sym",
+        designatorPrefix: "U",
+    }
+
+    pins: [
+        IN:1,
+        GND:2,
+    ]
+}
+`;
+
+        const parts = [
+            ["EarlierPart", "U?"],
+            ["TestPart", "U?"],
+        ];
+        for (const [name, ref] of parts) {
+            const dir = path.join(fixture.dir, "parts", name);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(path.join(dir, `${name}.schrune`), name === "EarlierPart" ? earlierPart : partFile);
+            fs.writeFileSync(path.join(dir, `${name}.kicad_sym`), symbolFile.replace(/TestPart/g, name).replace(/"U\?"/, JSON.stringify(ref)));
+            fs.writeFileSync(path.join(dir, `${name}.kicad_mod`), footprintFile.replace(/TestPart/g, name));
+        }
+
+        fs.writeFileSync(fixture.filePath, `#include "TestPart.schrune"
+
+module top () {
+    part u = new TestPart();
+}
+`);
+
+        const initialCompiled = assignDesignators(step1(fixture.filePath));
+        const initialResult = writeKiCadFiles(fixture.filePath, initialCompiled);
+        const designatorState = buildDesignatorState(initialCompiled);
+        const initialPcb = fs.readFileSync(initialResult.pcbPath, "utf8");
+        const segmentBlock = [
+            `  (segment`,
+            `    (start 1.00 2.00)`,
+            `    (end 3.00 4.00)`,
+            `    (width 0.25)`,
+            `    (layer "F.Cu")`,
+            `    (net 1)`,
+            `  )`,
+        ].join("\n");
+        const closingIndex = initialPcb.lastIndexOf("\n)");
+        const seededPcb = closingIndex === -1
+            ? `${initialPcb}\n${segmentBlock}\n`
+            : `${initialPcb.slice(0, closingIndex)}\n${segmentBlock}${initialPcb.slice(closingIndex)}`;
+        fs.writeFileSync(initialResult.pcbPath, seededPcb);
+
+        fs.writeFileSync(fixture.filePath, `#include "EarlierPart.schrune"
+#include "TestPart.schrune"
+
+module top () {
+    part a = new EarlierPart();
+    part u = new TestPart();
+}
+`);
+
+        const updatedCompiled = assignDesignators(step1(fixture.filePath), designatorState);
+        const updatedResult = writeKiCadFiles(fixture.filePath, updatedCompiled);
+        const updatedPcb = fs.readFileSync(updatedResult.pcbPath, "utf8");
+        const updatedSchematic = fs.readFileSync(updatedResult.schematicPath, "utf8");
+
+        assert.equal(updatedPcb, seededPcb);
+        assert.match(updatedSchematic, /\(symbol \(lib_id "EarlierPart"[\s\S]*?\(property "Reference" "U2"/);
+        assert.match(updatedSchematic, /\(symbol \(lib_id "TestPart"[\s\S]*?\(property "Reference" "U1"/);
+        assert.match(updatedSchematic, /\(property "Value" "EarlierPart"/);
+        assert.match(updatedSchematic, /\(property "Value" "TestPart"/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
