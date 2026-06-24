@@ -42,4 +42,5 @@
   * Colors for nets, parts, and modules
   * More intentional colors
   * Disable suggestions in comments
+* Add a "bridging" designator to parts with many pins
 

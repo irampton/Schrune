@@ -1649,6 +1649,15 @@ function executeStatement(statement, context, scope = {}) {
         return;
     }
 
+    const nameMatch = statement.match(/^(.+?)\.name\s*=\s*(.+)$/);
+    if (nameMatch) {
+        const endpoint = readEndpoint(nameMatch[1].trim(), componentsByName, nets, scope, modulesByName);
+        if (endpoint && endpoint.type === "pin") {
+            nameOverrides.set(endpoint.key, parseValue(nameMatch[2]));
+        }
+        return;
+    }
+
     if (/^for\s*\(/.test(statement)) {
         executeForStatement(statement, context, scope);
         return;
@@ -2555,8 +2564,19 @@ function renderStatements(statements, indent = 4, context = { netNames: new Set(
 function renderStatement(statement, indent = 4, context = { netNames: new Set(), railNames: new Set() }) {
     const padding = " ".repeat(indent);
 
-    if (parseNetDeclaration(statement) || /^.+?\.name\s*=/.test(statement)) {
+    if (parseNetDeclaration(statement)) {
         return [];
+    }
+
+    const nameMatch = statement.match(/^(.+?)\.name\s*=\s*(.+)$/);
+    if (nameMatch) {
+        const target = nameMatch[1].trim();
+        const railMatch = target.match(/^([A-Za-z_]\w*)\.(h|l)$/);
+        if (context.netNames.has(target) || (railMatch && context.railNames.has(railMatch[1]))) {
+            return [];
+        }
+
+        return [`${padding}__setNameOverride(${renderEndpoint(target, context)}, ${renderValueExpression(nameMatch[2])});`];
     }
 
     const valMatch = statement.match(/^val\s+([A-Za-z_]\w*)\s*=\s*(.+)$/);
@@ -2643,6 +2663,7 @@ function renderStatement(statement, indent = 4, context = { netNames: new Set(),
 function renderRuntimeHelpers() {
     return `    const components = [];\n` +
         `    const nets = {};\n` +
+        `    const nameOverrides = new Map();\n` +
         `    const pinGroups = new Map();\n` +
         `    const explicitNets = new Map();\n` +
         `    const netAliases = new Map();\n` +
@@ -2734,6 +2755,13 @@ function renderRuntimeHelpers() {
         `        return values;\n` +
         `    }\n` +
         `\n` +
+        `    function __setNameOverride(endpoint, value) {\n` +
+        `        if (!endpoint || endpoint.type !== "pin") {\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        nameOverrides.set(endpoint.key, value);\n` +
+        `    }\n` +
+        `\n` +
         `    function __net(ref) {\n` +
         `        return { type: "net", ref };\n` +
         `    }\n` +
@@ -2783,9 +2811,12 @@ function renderRuntimeHelpers() {
         `\n` +
         `    function __bridgePin(component, index, componentNameExpression) {\n` +
         `        const paths = __leafPinPaths(component.pins);\n` +
+        `        if (paths.length !== 2) {\n` +
+        `            throw new Error(\`Bridge middle "\${componentNameExpression}" must be a component with 2 pins\`);\n` +
+        `        }\n` +
         `        const path = paths[index];\n` +
         `        if (!path) {\n` +
-        `            throw new Error("Bridge middle must have 2 pins");\n` +
+        `            throw new Error(\`Bridge middle "\${componentNameExpression}" must be a component with 2 pins\`);\n` +
         `        }\n` +
         `        return __pin(component, path, componentNameExpression + "_" + path.map((part) => String(part)).join("_"));\n` +
         `    }\n` +
@@ -2928,7 +2959,14 @@ function renderRuntimeHelpers() {
         `        __setPinNet(pin.pin, resolvedNet);\n` +
         `    }\n` +
         `\n` +
-        `    function __reserveNetName(preferred, usedNames) {\n` +
+        `    function __reserveNetName(preferred, usedNames, isOverride) {\n` +
+        `        if (isOverride) {\n` +
+        `            if (usedNames.has(preferred)) {\n` +
+        `                throw new Error(\`Duplicate net name "\${preferred}"\`);\n` +
+        `            }\n` +
+        `            usedNames.add(preferred);\n` +
+        `            return preferred;\n` +
+        `        }\n` +
         `        let name = preferred;\n` +
         `        let index = 1;\n` +
         `        while (usedNames.has(name)) {\n` +
@@ -2994,7 +3032,14 @@ function renderRuntimeHelpers() {
         `                }\n` +
         `                continue;\n` +
         `            }\n` +
-        `            const netName = __reserveNetName(pinsByKey.get(root).defaultNetName, usedNames);\n` +
+        `            const overrideNames = keys\n` +
+        `                .map((pinKey) => nameOverrides.get(pinKey))\n` +
+        `                .filter((name) => name !== undefined);\n` +
+        `            const uniqueOverrides = [...new Set(overrideNames)];\n` +
+        `            if (uniqueOverrides.length > 1) {\n` +
+        `                throw new Error(\`Implicit net has multiple names: \${uniqueOverrides.join(\", \")}\`);\n` +
+        `            }\n` +
+        `            const netName = __reserveNetName(uniqueOverrides[0] || pinsByKey.get(root).defaultNetName, usedNames, uniqueOverrides.length === 1);\n` +
         `            netList.add(netName);\n` +
         `            compiledNets[netName] = netName;\n` +
         `            for (const key of keys) {\n` +
