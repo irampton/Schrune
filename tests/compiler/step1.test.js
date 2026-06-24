@@ -614,6 +614,33 @@ module top () {
     });
 });
 
+test("allows module-local renamed rails to join a higher-level net", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module child () {
+    rail power;
+    power.l.name = "GND";
+    part u = new TestPart();
+    u.IN ~ power.l;
+}
+
+module top () {
+    net gnd;
+    mod a = new child();
+    mod b = new child();
+    a.power.l ~ gnd;
+    b.power.l ~ gnd;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+
+        assert.equal(result.netList.has("gnd"), true);
+        assert.equal(result.components.length, 2);
+        assert.equal(result.components[0].pins.IN.net, "gnd");
+        assert.equal(result.components[1].pins.IN.net, "gnd");
+    });
+});
+
 test("evaluates val declarations in constructor expressions", () => {
     withFixture(`module top () {
     val feedback_r1 = 10kOhm;

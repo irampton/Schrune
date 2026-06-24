@@ -70,6 +70,42 @@ module top () {
     }
 });
 
+test("kept Step 1 JavaScript allows module-local renamed rails to join a higher-level net", () => {
+    const fixture = makeFixture(`#include "TestPart.schrune"
+
+module child () {
+    rail power;
+    power.l.name = "GND";
+    part u = new TestPart();
+    u.IN ~ power.l;
+}
+
+module top () {
+    net gnd;
+    mod a = new child();
+    mod b = new child();
+    a.power.l ~ gnd;
+    b.power.l ~ gnd;
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+
+        assert.equal(result.netList.has("gnd"), true);
+        assert.equal(result.components.length, 2);
+        assert.equal(result.components[0].pins.IN.net, "gnd");
+        assert.equal(result.components[1].pins.IN.net, "gnd");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("kept part JavaScript preserves indexed named pin groups", () => {
     const groupedPart = `part GroupedPart {
     info: {

@@ -1042,7 +1042,7 @@ function getNetValue(expression, nets, modulesByName) {
 
 function connectNetBindings(left, right, leftExpression, rightExpression, nameOverrides, netAliases = new Map()) {
     function resolvedName(expression, binding) {
-        return nameOverrides.get(expression.trim()) || netRefName(rootNetRef(binding.value));
+        return netRefName(rootNetRef(binding.value));
     }
 
     if (isNetGroup(left.value) || isNetGroup(right.value)) {
@@ -1104,8 +1104,8 @@ function connectNetBindings(left, right, leftExpression, rightExpression, nameOv
         return;
     }
 
-    const leftNamed = nameOverrides.has(leftExpression.trim()) || (isNetRef(leftRoot) && leftRoot.isOverride);
-    const rightNamed = nameOverrides.has(rightExpression.trim()) || (isNetRef(rightRoot) && rightRoot.isOverride);
+    const leftNamed = isNetRef(leftRoot) && leftRoot.isOverride && !isScopedNetRef(leftRoot);
+    const rightNamed = isNetRef(rightRoot) && rightRoot.isOverride && !isScopedNetRef(rightRoot);
     const leftResolvedName = resolvedName(leftExpression, left);
     const rightResolvedName = resolvedName(rightExpression, right);
 
@@ -1386,7 +1386,7 @@ function connectEndpoints(leftExpression, rightExpression, componentsByName, net
     }
 
     if (left.type === "pin" && right.type === "pin") {
-        pinGroups.union(left, right);
+        pinGroups.union(left, right, netAliases);
         return;
     }
 
@@ -1394,7 +1394,7 @@ function connectEndpoints(leftExpression, rightExpression, componentsByName, net
         if (isNetGroup(right.value)) {
             throw new Error(`Net group "${rightExpression}" must be connected via one of its signals`);
         }
-        pinGroups.connectExplicit(left, right.value);
+        pinGroups.connectExplicit(left, right.value, netAliases);
         return;
     }
 
@@ -1402,7 +1402,7 @@ function connectEndpoints(leftExpression, rightExpression, componentsByName, net
         if (isNetGroup(left.value)) {
             throw new Error(`Net group "${leftExpression}" must be connected via one of its signals`);
         }
-        pinGroups.connectExplicit(right, left.value);
+        pinGroups.connectExplicit(right, left.value, netAliases);
         return;
     }
 
@@ -1719,7 +1719,14 @@ class PinNetGroups {
         return root;
     }
 
-    union(left, right) {
+    union(left, right, netAliases = new Map()) {
+        function resolveAlias(name) {
+            while (netAliases.has(name)) {
+                name = netAliases.get(name);
+            }
+            return name;
+        }
+
         this.add(left);
         this.add(right);
         const leftRoot = this.find(left.key);
@@ -1731,26 +1738,36 @@ class PinNetGroups {
 
         const leftNet = this.explicitNets.get(leftRoot);
         const rightNet = this.explicitNets.get(rightRoot);
-        if (leftNet && rightNet && leftNet !== rightNet) {
-            throw new Error(`Connection joins nets "${leftNet}" and "${rightNet}"`);
+        const leftResolved = leftNet && resolveAlias(leftNet);
+        const rightResolved = rightNet && resolveAlias(rightNet);
+        if (leftResolved && rightResolved && leftResolved !== rightResolved) {
+            throw new Error(`Connection joins nets "${leftResolved}" and "${rightResolved}"`);
         }
 
         this.parents.set(rightRoot, leftRoot);
         if (!this.defaults.has(leftRoot)) {
             this.defaults.set(leftRoot, left.defaultNetName);
         }
-        if (!leftNet && rightNet) {
-            this.explicitNets.set(leftRoot, rightNet);
+        if (!leftResolved && rightResolved) {
+            this.explicitNets.set(leftRoot, rightResolved);
         }
     }
 
-    connectExplicit(pin, netName) {
+    connectExplicit(pin, netName, netAliases = new Map()) {
+        function resolveAlias(name) {
+            while (netAliases.has(name)) {
+                name = netAliases.get(name);
+            }
+            return name;
+        }
+
         this.add(pin);
         const root = this.find(pin.key);
-        const resolvedNet = isNetRef(netName) ? netName.value : netName;
+        const resolvedNet = resolveAlias(isNetRef(netName) ? netName.value : netName);
         const existing = this.explicitNets.get(root);
-        if (existing && existing !== resolvedNet) {
-            throw new Error(`Pin "${pin.key}" connects to both "${existing}" and "${resolvedNet}"`);
+        const resolvedExisting = existing && resolveAlias(existing);
+        if (resolvedExisting && resolvedExisting !== resolvedNet) {
+            throw new Error(`Pin "${pin.key}" connects to both "${resolvedExisting}" and "${resolvedNet}"`);
         }
 
         this.explicitNets.set(root, resolvedNet);
@@ -1807,9 +1824,10 @@ function netTypeSignals(type) {
     return NET_TYPE_SIGNALS[normalizeNetType(type)];
 }
 
-function createNetRef(value, isOverride = false) {
+function createNetRef(value, isOverride = false, name = value) {
     return {
         __netRef: true,
+        name,
         value,
         isOverride,
         aliasOf: undefined,
@@ -1825,8 +1843,8 @@ function createNetGroup(name, type, signalNames, pathPrefix = "", nameOverrides 
     for (const signalName of signalNames) {
         const key = `${name}.${signalName}`;
         const overrideName = nameOverrides.get(key);
-        const finalName = overrideName || `${pathPrefix}${name}.${signalName}`;
-        const ref = createNetRef(finalName, Boolean(overrideName));
+        const finalName = overrideName ? `${pathPrefix}${overrideName}` : `${pathPrefix}${name}.${signalName}`;
+        const ref = createNetRef(finalName, false, pathPrefix ? key : finalName);
         ref.group = name;
         ref.signal = signalName;
         group[signalName] = ref;
@@ -1861,6 +1879,11 @@ function rootNetRef(value) {
         value = value.aliasOf;
     }
     return value;
+}
+
+function isScopedNetRef(value) {
+    const root = rootNetRef(value);
+    return isNetRef(root) && root.name !== root.value;
 }
 
 function collectNetRefs(value, refs = [], seen = new Set()) {
@@ -1902,20 +1925,27 @@ function applyNetNames(declarations, nameOverrides, pathPrefix = "") {
 
     for (const declaration of declarations) {
         if (declaration.kind === "net" && !declaration.type) {
-            const finalName = nameOverrides.get(declaration.name) || declaration.defaultName;
+            const overrideName = nameOverrides.get(declaration.name);
+            const finalName = overrideName ? `${pathPrefix}${overrideName}` : declaration.defaultName;
             if (usedNames.has(finalName)) {
                 throw new Error(`Duplicate net name "${finalName}"`);
             }
             usedNames.add(finalName);
-            nets[declaration.name] = createNetRef(finalName, Boolean(nameOverrides.get(declaration.name)) || Boolean(declaration.inlineAnchor));
+            nets[declaration.name] = createNetRef(
+                finalName,
+                !pathPrefix && (Boolean(overrideName) || Boolean(declaration.inlineAnchor)),
+                pathPrefix ? declaration.name : finalName
+            );
             continue;
         }
 
         if (declaration.kind === "rail") {
             const highKey = `${declaration.name}.h`;
             const lowKey = `${declaration.name}.l`;
-            const highName = nameOverrides.get(highKey) || declaration.defaultHigh;
-            const lowName = nameOverrides.get(lowKey) || declaration.defaultLow;
+            const highOverride = nameOverrides.get(highKey);
+            const lowOverride = nameOverrides.get(lowKey);
+            const highName = highOverride ? `${pathPrefix}${highOverride}` : declaration.defaultHigh;
+            const lowName = lowOverride ? `${pathPrefix}${lowOverride}` : declaration.defaultLow;
 
             if (usedNames.has(highName)) {
                 throw new Error(`Duplicate net name "${highName}"`);
@@ -1928,8 +1958,8 @@ function applyNetNames(declarations, nameOverrides, pathPrefix = "") {
             usedNames.add(lowName);
 
             nets[declaration.name] = {
-                h: createNetRef(highName, Boolean(nameOverrides.get(highKey))),
-                l: createNetRef(lowName, Boolean(nameOverrides.get(lowKey))),
+                h: createNetRef(highName, !pathPrefix && Boolean(highOverride), pathPrefix ? highKey : highName),
+                l: createNetRef(lowName, !pathPrefix && Boolean(lowOverride), pathPrefix ? lowKey : lowName),
                 voltage: undefined,
             };
             continue;
@@ -2649,8 +2679,8 @@ function renderRuntimeHelpers() {
         `        return { __netRef: true, name, value, isOverride };\n` +
         `    }\n` +
         `\n` +
-        `    function __declareNet(name, value, isOverride = false) {\n` +
-        `        const ref = __netRef(name, value, isOverride);\n` +
+        `    function __declareNet(name, value, isOverride = false, refName = name) {\n` +
+        `        const ref = __netRef(refName, value, isOverride);\n` +
         `        nets[__scopeName(name)] = ref;\n` +
         `        return ref;\n` +
         `    }\n` +
@@ -2670,10 +2700,10 @@ function renderRuntimeHelpers() {
         `        return group;\n` +
         `    }\n` +
         `\n` +
-        `    function __declareRail(name, high, low, highOverride = false, lowOverride = false) {\n` +
+        `    function __declareRail(name, high, low, highOverride = false, lowOverride = false, isTopLevel = false) {\n` +
         `        const rail = {\n` +
-        `            h: __netRef(name + ".h", high, highOverride),\n` +
-        `            l: __netRef(name + ".l", low, lowOverride),\n` +
+        `            h: __netRef(isTopLevel ? high : name + ".h", high, highOverride),\n` +
+        `            l: __netRef(isTopLevel ? low : name + ".l", low, lowOverride),\n` +
         `            voltage: undefined,\n` +
         `        };\n` +
         `        nets[__scopeName(name)] = rail;\n` +
@@ -2715,8 +2745,14 @@ function renderRuntimeHelpers() {
         `        return ref;\n` +
         `    }\n` +
         `\n` +
+        `    function __isScopedNetRef(ref) {\n` +
+        `        const root = __rootNetRef(ref);\n` +
+        `        return Boolean(root && root.name !== root.value);\n` +
+        `    }\n` +
+        `\n` +
         `    function __isNamedNetRef(ref) {\n` +
-        `        return Boolean(__rootNetRef(ref).isOverride);\n` +
+        `        const root = __rootNetRef(ref);\n` +
+        `        return Boolean(root && root.isOverride && !__isScopedNetRef(root));\n` +
         `    }\n` +
         `\n` +
         `    function __pin(component, path, defaultNetName) {\n` +
@@ -2724,7 +2760,8 @@ function renderRuntimeHelpers() {
         `        for (const part of path) {\n` +
         `            pin = pin[part];\n` +
         `        }\n` +
-        `        return { type: "pin", pin, key: defaultNetName, defaultNetName };\n` +
+        `        const scopedDefaultNetName = __scopeName(defaultNetName);\n` +
+        `        return { type: "pin", pin, key: scopedDefaultNetName, defaultNetName: scopedDefaultNetName };\n` +
         `    }\n` +
         `\n` +
         `    function __leafPinPaths(value, path = [], paths = []) {\n` +
@@ -2784,6 +2821,13 @@ function renderRuntimeHelpers() {
         `    }\n` +
         `\n` +
         `    function __connect(left, right) {\n` +
+        `        const resolveAlias = (name) => {\n` +
+        `            while (netAliases.has(name)) {\n` +
+        `                name = netAliases.get(name);\n` +
+        `            }\n` +
+        `            return name;\n` +
+        `        };\n` +
+        `\n` +
         `        const leftRail = left.type === "net" ? (!left.ref.__netRef && !left.ref.__netGroup && left.ref.h && left.ref.l) : Boolean(left.pin && left.pin.__pinRail);\n` +
         `        const rightRail = right.type === "net" ? (!right.ref.__netRef && !right.ref.__netGroup && right.ref.h && right.ref.l) : Boolean(right.pin && right.pin.__pinRail);\n` +
         `        if (leftRail || rightRail) {\n` +
@@ -2856,10 +2900,16 @@ function renderRuntimeHelpers() {
         `            const leftRoot = __find(left.key);\n` +
         `            const rightRoot = __find(right.key);\n` +
         `            if (leftRoot !== rightRoot) {\n` +
-        `                pinGroups.set(rightRoot, leftRoot);\n` +
+        `                const leftNet = explicitNets.get(leftRoot);\n` +
         `                const rightNet = explicitNets.get(rightRoot);\n` +
-        `                if (rightNet && !explicitNets.has(leftRoot)) {\n` +
-        `                    explicitNets.set(leftRoot, rightNet);\n` +
+        `                const leftResolved = leftNet && resolveAlias(leftNet);\n` +
+        `                const rightResolved = rightNet && resolveAlias(rightNet);\n` +
+        `                if (leftResolved && rightResolved && leftResolved !== rightResolved) {\n` +
+        `                    throw new Error(\`Connection joins nets "\${leftResolved}" and "\${rightResolved}"\`);\n` +
+        `                }\n` +
+        `                pinGroups.set(rightRoot, leftRoot);\n` +
+        `                if (!leftResolved && rightResolved) {\n` +
+        `                    explicitNets.set(leftRoot, rightResolved);\n` +
         `                }\n` +
         `            }\n` +
         `            return;\n` +
@@ -2869,11 +2919,13 @@ function renderRuntimeHelpers() {
         `        __addPin(pin);\n` +
         `        const root = __find(pin.key);\n` +
         `        const existing = explicitNets.get(root);\n` +
-        `        if (existing && existing !== net) {\n` +
-        `            throw new Error(\`Pin "\${pin.key}" connects to both "\${existing}" and "\${net}"\`);\n` +
+        `        const resolvedNet = resolveAlias(net);\n` +
+        `        const resolvedExisting = existing && resolveAlias(existing);\n` +
+        `        if (resolvedExisting && resolvedExisting !== resolvedNet) {\n` +
+        `            throw new Error(\`Pin "\${pin.key}" connects to both "\${resolvedExisting}" and "\${resolvedNet}"\`);\n` +
         `        }\n` +
-        `        explicitNets.set(root, net);\n` +
-        `        __setPinNet(pin.pin, net);\n` +
+        `        explicitNets.set(root, resolvedNet);\n` +
+        `        __setPinNet(pin.pin, resolvedNet);\n` +
         `    }\n` +
         `\n` +
         `    function __reserveNetName(preferred, usedNames) {\n` +
@@ -2956,6 +3008,7 @@ function renderRuntimeHelpers() {
 function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTemplate.name) {
     const statements = splitStatements(moduleTemplate.body);
     const { declarations, nameOverrides } = collectTopDeclarations(statements);
+    const isTopLevel = functionName === "__module_top" || moduleTemplate.name === "top";
     const moduleContext = {
         ...context,
         netNames: new Set(declarations.filter((declaration) => declaration.kind === "net").map((declaration) => declaration.name)),
@@ -2969,12 +3022,14 @@ function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTe
                 return `    const ${declaration.name} = __declareNetGroup(${jsString(declaration.name)}, ${jsString(declaration.type)});`;
             }
             const finalName = nameOverrides.get(declaration.name) || declaration.defaultName;
-            return `    const ${declaration.name} = __declareNet(${jsString(declaration.name)}, __scopeName(${jsString(finalName)}), ${nameOverrides.has(declaration.name) || Boolean(declaration.inlineAnchor)});`;
+            return `    const ${declaration.name} = __declareNet(${jsString(declaration.name)}, __scopeName(${jsString(finalName)}), ${isTopLevel && (nameOverrides.has(declaration.name) || Boolean(declaration.inlineAnchor))}, ${jsString(isTopLevel ? finalName : declaration.name)});`;
         }
 
         const highKey = `${declaration.name}.h`;
         const lowKey = `${declaration.name}.l`;
-        return `    const ${declaration.name} = __declareRail(${jsString(declaration.name)}, __scopeName(${jsString(nameOverrides.get(highKey) || declaration.defaultHigh)}), __scopeName(${jsString(nameOverrides.get(lowKey) || declaration.defaultLow)}), ${nameOverrides.has(highKey)}, ${nameOverrides.has(lowKey)});`;
+        const highName = nameOverrides.get(highKey) || declaration.defaultHigh;
+        const lowName = nameOverrides.get(lowKey) || declaration.defaultLow;
+        return `    const ${declaration.name} = __declareRail(${jsString(declaration.name)}, __scopeName(${jsString(highName)}), __scopeName(${jsString(lowName)}), ${isTopLevel && nameOverrides.has(highKey)}, ${isTopLevel && nameOverrides.has(lowKey)}, ${isTopLevel});`;
     });
     const statementLines = renderStatements(statements, 4, moduleContext);
 
@@ -3116,6 +3171,10 @@ function materializeStep1JavaScript(filePath, outputRoot) {
     }
 }
 
+function writeStep1JavaScript(filePath, outputRoot = path.dirname(path.resolve(filePath))) {
+    materializeStep1JavaScript(filePath, outputRoot);
+}
+
 function executeStep1JavaScript(filePath) {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-step1-"));
     try {
@@ -3246,6 +3305,7 @@ module.exports = {
     readDesignatorState,
     step1,
     step3,
+    writeStep1JavaScript,
     writeKiCadFiles,
     writeDesignatorState,
     materializeStep1JavaScript,
