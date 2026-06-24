@@ -466,3 +466,40 @@ test("BOM rows group equivalent components and CSV escapes fields", () => {
     assert.equal(rows[0].quantity, 2);
     assert.match(bomCsv(rows), /R1 R2,2,YAGEO,RC0603FR-0710KL,C25804,10k,0603,Resistor,"precision, ""thin film"""/);
 });
+
+test("BOM rows stay merged when source-side labels differ for the same selected part", () => {
+    const rows = makeBomRows({
+        components: [
+            {
+                designator: "R1",
+                constructor: { name: "Resistor" },
+                value: "10k",
+                footprint: "0603",
+                info: {},
+                selectedPart: {
+                    lcsc: "C25804",
+                    manufacturer: "YAGEO",
+                    mpn: "RC0603FR-0710KL",
+                    package: "0603",
+                },
+            },
+            {
+                designator: "R2",
+                constructor: { name: "Resistor" },
+                value: "10kOhm",
+                footprint: "R_0603",
+                info: {},
+                selectedPart: {
+                    lcsc: "C25804",
+                    manufacturer: "YAGEO",
+                    mpn: "RC0603FR-0710KL",
+                    package: "R_0603",
+                },
+            },
+        ],
+    });
+
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0].designators, ["R1", "R2"]);
+    assert.equal(rows[0].quantity, 2);
+});

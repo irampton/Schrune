@@ -648,11 +648,13 @@ async function resolveGenericParts(filePath, compiled, options = {}) {
 
 function bomIdentity(component) {
     const selected = component.selectedPart || {};
+    const lcsc = selected.lcsc || component.info && component.info.LCSC || "";
+    const mpn = selected.mpn || component.info && component.info.partNumber || "";
+
     return [
-        selected.lcsc || component.info && component.info.LCSC || "",
-        selected.mpn || component.info && component.info.partNumber || componentKind(component),
-        component.value || "",
-        component.footprint || component.info && component.info.footprint || "",
+        lcsc,
+        mpn,
+        componentKind(component),
     ].join("\0");
 }
 
@@ -685,7 +687,13 @@ function makeBomRows(compiled) {
         row.designators.push(component.designator);
     }
 
-    return [...groups.values()].sort((left, right) => left.designators[0].localeCompare(right.designators[0], undefined, { numeric: true }));
+    const sortDesignators = (designators) => [...designators].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+    return [...groups.values()]
+        .map((row) => ({
+            ...row,
+            designators: sortDesignators(row.designators),
+        }))
+        .sort((left, right) => left.designators[0].localeCompare(right.designators[0], undefined, { numeric: true }));
 }
 
 function csvEscape(value) {
