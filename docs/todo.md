@@ -2,8 +2,6 @@
 
 ## High
 
-* No duplicate lines in BOM
-* Make VSCode highlight extention
 * Publish on GitHub/npm
 
 ## Not High, but Need to Do
