@@ -224,7 +224,7 @@ module top () {
 
         const generatedPath = path.join(fixture.dir, "fixture.js");
         const generated = fs.readFileSync(generatedPath, "utf8");
-        assert.match(generated, /const Resistor = require\(".+src\/include\/resistor"\);/);
+        assert.match(generated, /const Resistor = require\(".*src\/include\/resistor\.js"\);/);
         assert.doesNotMatch(generated, /class Resistor/);
         assert.match(generated, /for \(let i = 0; i < parts\.length; i\+\+\)/);
         assert.match(generated, /if \(i < 2\)/);

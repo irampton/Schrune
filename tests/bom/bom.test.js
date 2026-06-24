@@ -68,20 +68,28 @@ test("primitive components keep selection fields", () => {
 });
 
 test("assignDesignators reuses a prior designator state when components move around", () => {
-    const initial = assignDesignators(step1(`module top () {
+    const initialFixture = makeFixture(`module top () {
     a = new Resistor(value = "10k", footprint = "0603");
 }
-`));
-    const designatorState = buildDesignatorState(initial);
-    const rebuilt = assignDesignators(step1(`module top () {
+`);
+    const rebuiltFixture = makeFixture(`module top () {
     b = new Resistor(value = "1k", footprint = "0603");
     a = new Resistor(value = "10k", footprint = "0603");
 }
-`), designatorState);
+`);
 
-    const byValue = new Map(rebuilt.components.map((component) => [component.value, component.designator]));
-    assert.equal(byValue.get("10k"), "R1");
-    assert.equal(byValue.get("1k"), "R2");
+    try {
+        const initial = assignDesignators(step1(initialFixture.filePath));
+        const designatorState = buildDesignatorState(initial);
+        const rebuilt = assignDesignators(step1(rebuiltFixture.filePath), designatorState);
+
+        const byValue = new Map(rebuilt.components.map((component) => [component.value, component.designator]));
+        assert.equal(byValue.get("10k"), "R1");
+        assert.equal(byValue.get("1k"), "R2");
+    } finally {
+        fs.rmSync(initialFixture.dir, { recursive: true, force: true });
+        fs.rmSync(rebuiltFixture.dir, { recursive: true, force: true });
+    }
 });
 
 test("step3 reuses parts-lock entries and writes BOM csv", async () => {

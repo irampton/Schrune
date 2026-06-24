@@ -199,14 +199,15 @@ module top () {
     });
 });
 
-test("throws when no top module is found", () => {
+test("returns helper module nets when no top module is found", () => {
     withFixture(`#include "TestPart.schrune"
 
 module helper () {
     net signal;
 }
 `, (filePath) => {
-        assert.throws(() => step1(filePath), /No top module found/);
+        const result = step1(filePath);
+        assert.equal(result.signal.value, "signal");
     });
 });
 
