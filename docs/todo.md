@@ -2,7 +2,6 @@
 
 ## High
 
-* Updating the build, not overridding
 * No duplicate lines in BOM
 * Make VSCode highlight extention
 * Publish on GitHub/npm

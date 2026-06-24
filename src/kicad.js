@@ -481,11 +481,20 @@ function renderSchematicProperty(_projectName, _component, name, value, x, y, op
 function renderSchematicSymbol(component, symbol, placement, projectName) {
     const pinLines = [...symbol.pins.keys()]
         .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
-        .map((pinNumber) => `    (pin ${kicadString(pinNumber)} (uuid ${kicadId(`${projectName}:sch:${component.designator}:pin:${pinNumber}`)}))`);
+        .map((pinNumber) => {
+            const pin = symbol.pins.get(pinNumber);
+            const geometry = `${pin.x}:${pin.y}:${pin.angle}:${pin.length}`;
+            return `    (pin ${kicadString(pinNumber)} (uuid ${kicadId(`${projectName}:sch:${component.designator}:pin:${pinNumber}:${geometry}`)}))`;
+        });
+    const symbolGeometry = [...symbol.pins.entries()]
+        .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
+        .map(([pinNumber, pin]) => `${pinNumber}:${pin.x}:${pin.y}:${pin.angle}:${pin.length}`)
+        .join("|");
+    const symbolInstanceSeed = `${projectName}:sch:${component.designator}:${symbol.name}:${placement.x}:${placement.y}:${placement.rotation}:${symbolGeometry}`;
     return [
         `  (symbol (lib_id ${kicadString(symbol.name)}) (at ${placement.x.toFixed(2)} ${placement.y.toFixed(2)} ${placement.rotation}) (unit 1)`,
         `    (in_bom yes) (on_board yes) (dnp no)`,
-        `    (uuid ${kicadId(`${projectName}:sch:${component.designator}`)})`,
+        `    (uuid ${kicadId(symbolInstanceSeed)})`,
         renderSchematicProperty(projectName, component, "Reference", component.designator, placement.x, placement.y - 5.08),
         renderSchematicProperty(projectName, component, "Value", component.value || component.info.partNumber || componentKind(component), placement.x, placement.y + 5.08),
         renderSchematicProperty(projectName, component, "Footprint", `${FOOTPRINT_LIBRARY_NAME}:${symbol.footprintName}`, placement.x, placement.y + 7.62, { hide: true }),
@@ -505,7 +514,7 @@ function renderSchematicSymbol(component, symbol, placement, projectName) {
 function renderNetConnection(projectName, component, netName, point, pin, options = {}) {
     const end = labelEnd(point, pin);
     const label = labelPoint(point, end);
-    const seed = `${projectName}:${component.designator}:${pin.number}:${netName}`;
+    const seed = `${projectName}:${component.designator}:${pin.number}:${netName}:${point.x}:${point.y}:${end.x}:${end.y}`;
     const labelToken = options.globalLabels ? "global_label" : "label";
     const labelShape = labelToken === "global_label" ? " (shape input)" : "";
     return [
@@ -763,6 +772,174 @@ function renderPcb(filePath, compiled, assets, placements) {
     ].join("\n");
 }
 
+function findChildExpressions(source, parentOpenIndex, childName) {
+    const parentCloseIndex = findMatching(source, parentOpenIndex);
+    const matches = [];
+    let inString = false;
+    let escaped = false;
+
+    for (let i = parentOpenIndex + 1; i < parentCloseIndex; i++) {
+        const char = source[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (char === "\\") {
+                escaped = true;
+            } else if (char === "\"") {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === "\"") {
+            inString = true;
+            continue;
+        }
+
+        if (char === "(") {
+            const name = readExpressionName(source, i);
+            const closeIndex = findMatching(source, i);
+            if (!childName || name === childName) {
+                matches.push({
+                    openIndex: i,
+                    closeIndex,
+                    source: source.slice(i, closeIndex + 1),
+                });
+            }
+            i = closeIndex;
+        }
+    }
+
+    return matches;
+}
+
+function replaceExpressionRange(source, expressions, replacement) {
+    if (!expressions.length) {
+        return source;
+    }
+
+    const start = expressions[0].openIndex;
+    const end = expressions[expressions.length - 1].closeIndex + 1;
+    return `${source.slice(0, start)}${replacement}${source.slice(end)}`;
+}
+
+function parsePcbNetMap(pcbSource) {
+    const rootOpenIndex = pcbSource.indexOf("(kicad_pcb");
+    if (rootOpenIndex === -1) {
+        return new Map();
+    }
+
+    const nets = new Map();
+    for (const expression of findChildExpressions(pcbSource, rootOpenIndex, "net")) {
+        const match = expression.source.match(/^\(net\s+(\d+)\s+"([^"]*)"\)$/);
+        if (match) {
+            nets.set(Number(match[1]), match[2]);
+        }
+    }
+    return nets;
+}
+
+function footprintReference(footprintSource) {
+    const propertyMatch = footprintSource.match(/\(property\s+"Reference"\s+"([^"]+)"/);
+    if (propertyMatch) {
+        return propertyMatch[1];
+    }
+
+    const textMatch = footprintSource.match(/\(fp_text\s+reference\s+"([^"]+)"/);
+    return textMatch && textMatch[1];
+}
+
+function footprintMap(pcbSource) {
+    const rootOpenIndex = pcbSource.indexOf("(kicad_pcb");
+    if (rootOpenIndex === -1) {
+        return new Map();
+    }
+
+    const footprints = new Map();
+    for (const expression of findChildExpressions(pcbSource, rootOpenIndex, "footprint")) {
+        const reference = footprintReference(expression.source);
+        if (reference) {
+            footprints.set(reference, expression.source);
+        }
+    }
+    return footprints;
+}
+
+function preserveFootprintPlacement(nextFootprint, previousFootprint) {
+    if (!previousFootprint) {
+        return nextFootprint;
+    }
+
+    let output = nextFootprint;
+    const previousAt = previousFootprint.match(/\n(\s*)\(at\s+([^)]+)\)/);
+    if (previousAt) {
+        output = output.replace(/\n(\s*)\(at\s+[^)]+\)/, `\n$1(at ${previousAt[2]})`);
+    }
+
+    const previousLayer = previousFootprint.match(/^\s*\(footprint\s+"[^"]+"\s+\(layer\s+"([^"]+)"\)/);
+    if (previousLayer) {
+        output = output.replace(/^(\s*\(footprint\s+"[^"]+"\s+\(layer\s+)"[^"]+"(\))/, `$1"${previousLayer[1]}"$2`);
+    }
+
+    return output;
+}
+
+function remapPcbItemNetNumbers(pcbSource, previousNetNumbers, nextNetNumbers) {
+    return pcbSource.replace(/\(net\s+(\d+)\)/g, (match, numberText) => {
+        const previousName = previousNetNumbers.get(Number(numberText));
+        if (!previousName) {
+            return match;
+        }
+
+        return `(net ${nextNetNumbers.get(previousName) || 0})`;
+    });
+}
+
+function insertBeforeRootClose(source, replacement) {
+    const rootOpenIndex = source.indexOf("(kicad_pcb");
+    if (rootOpenIndex === -1) {
+        return source;
+    }
+
+    const rootCloseIndex = findMatching(source, rootOpenIndex);
+    return `${source.slice(0, rootCloseIndex).trimEnd()}\n${replacement}\n${source.slice(rootCloseIndex)}`;
+}
+
+function refreshExistingPcb(existingPcb, nextPcb) {
+    const existingRootOpenIndex = existingPcb.indexOf("(kicad_pcb");
+    const nextRootOpenIndex = nextPcb.indexOf("(kicad_pcb");
+    if (existingRootOpenIndex === -1 || nextRootOpenIndex === -1) {
+        return nextPcb;
+    }
+
+    const nextNetExpressions = findChildExpressions(nextPcb, nextRootOpenIndex, "net");
+    const nextFootprintExpressions = findChildExpressions(nextPcb, nextRootOpenIndex, "footprint");
+    const nextNetNumbersByName = new Map([...parsePcbNetMap(nextPcb)].map(([number, name]) => [name, number]));
+    const previousNetNumbers = parsePcbNetMap(existingPcb);
+    const previousFootprints = footprintMap(existingPcb);
+
+    let refreshed = remapPcbItemNetNumbers(existingPcb, previousNetNumbers, nextNetNumbersByName);
+    const refreshedRootOpenIndex = refreshed.indexOf("(kicad_pcb");
+    const existingNetExpressions = findChildExpressions(refreshed, refreshedRootOpenIndex, "net");
+    const nextNetBlock = nextNetExpressions.map((expression) => `  ${expression.source}`).join("\n");
+    refreshed = existingNetExpressions.length
+        ? replaceExpressionRange(refreshed, existingNetExpressions, nextNetBlock)
+        : insertBeforeRootClose(refreshed, nextNetBlock);
+
+    const refreshedRootAfterNets = refreshed.indexOf("(kicad_pcb");
+    const existingFootprintExpressions = findChildExpressions(refreshed, refreshedRootAfterNets, "footprint");
+    const nextFootprintBlock = nextFootprintExpressions
+        .map((expression) => {
+            const reference = footprintReference(expression.source);
+            return preserveFootprintPlacement(expression.source, previousFootprints.get(reference));
+        })
+        .join("\n");
+
+    return existingFootprintExpressions.length
+        ? replaceExpressionRange(refreshed, existingFootprintExpressions, nextFootprintBlock)
+        : insertBeforeRootClose(refreshed, nextFootprintBlock);
+}
+
 function renderProject(projectName) {
     return `${JSON.stringify({
         board: {
@@ -881,9 +1058,11 @@ function writeKiCadFiles(filePath, compiled) {
         moduleSchematicPaths[entry.name] = modulePath;
     }
 
-    if (!fs.existsSync(pcbPath)) {
-        fs.writeFileSync(pcbPath, renderPcb(filePath, compiled, assets, componentPlacement(compiled)));
-    }
+    const nextPcb = renderPcb(filePath, compiled, assets, componentPlacement(compiled));
+    const pcbSource = fs.existsSync(pcbPath)
+        ? refreshExistingPcb(fs.readFileSync(pcbPath, "utf8"), nextPcb)
+        : nextPcb;
+    fs.writeFileSync(pcbPath, pcbSource);
 
     return {
         ...compiled,

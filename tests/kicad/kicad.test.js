@@ -357,7 +357,7 @@ module top () {
     }
 });
 
-test("leaves an existing PCB untouched while updating the schematic and designators", () => {
+test("refreshes an existing PCB while preserving placement and board items", () => {
     const fixture = makeFixture();
     try {
         const earlierPart = `part EarlierPart {
@@ -391,7 +391,12 @@ test("leaves an existing PCB untouched while updating the schematic and designat
         fs.writeFileSync(fixture.filePath, `#include "TestPart.schrune"
 
 module top () {
+    rail power;
+    net signal;
+    power.l.name = "GND";
     part u = new TestPart();
+    u.IN ~ signal;
+    u.GND ~ power.l;
 }
 `);
 
@@ -399,27 +404,36 @@ module top () {
         const initialResult = writeKiCadFiles(fixture.filePath, initialCompiled);
         const designatorState = buildDesignatorState(initialCompiled);
         const initialPcb = fs.readFileSync(initialResult.pcbPath, "utf8");
+        const initialGndNet = initialPcb.match(/\(net\s+(\d+)\s+"GND"\)/)[1];
         const segmentBlock = [
             `  (segment`,
             `    (start 1.00 2.00)`,
             `    (end 3.00 4.00)`,
             `    (width 0.25)`,
             `    (layer "F.Cu")`,
-            `    (net 1)`,
+            `    (net ${initialGndNet})`,
             `  )`,
         ].join("\n");
-        const closingIndex = initialPcb.lastIndexOf("\n)");
+        const movedPcb = initialPcb.replace(/\n(\s*)\(at\s+[^)]+\)/, "\n$1(at 99.00 88.00 45)");
+        const closingIndex = movedPcb.lastIndexOf("\n)");
         const seededPcb = closingIndex === -1
-            ? `${initialPcb}\n${segmentBlock}\n`
-            : `${initialPcb.slice(0, closingIndex)}\n${segmentBlock}${initialPcb.slice(closingIndex)}`;
+            ? `${movedPcb}\n${segmentBlock}\n`
+            : `${movedPcb.slice(0, closingIndex)}\n${segmentBlock}${movedPcb.slice(closingIndex)}`;
         fs.writeFileSync(initialResult.pcbPath, seededPcb);
 
         fs.writeFileSync(fixture.filePath, `#include "EarlierPart.schrune"
 #include "TestPart.schrune"
 
 module top () {
+    rail power;
+    net signal;
+    power.l.name = "GND";
     part a = new EarlierPart();
     part u = new TestPart();
+    a.IN ~ signal;
+    a.GND ~ power.l;
+    u.IN ~ signal;
+    u.GND ~ power.l;
 }
 `);
 
@@ -427,8 +441,12 @@ module top () {
         const updatedResult = writeKiCadFiles(fixture.filePath, updatedCompiled);
         const updatedPcb = fs.readFileSync(updatedResult.pcbPath, "utf8");
         const updatedSchematic = fs.readFileSync(updatedResult.schematicPath, "utf8");
+        const updatedGndNet = updatedPcb.match(/\(net\s+(\d+)\s+"GND"\)/)[1];
 
-        assert.equal(updatedPcb, seededPcb);
+        assert.notEqual(updatedPcb, seededPcb);
+        assert.match(updatedPcb, /\(footprint "Schrune:EarlierPart"/);
+        assert.match(updatedPcb, /\(footprint "Schrune:TestPart"[\s\S]*?\(at 99\.00 88\.00 45\)/);
+        assert.match(updatedPcb, new RegExp(`\\(segment[\\s\\S]*?\\(net ${updatedGndNet}\\)`));
         assert.match(updatedSchematic, /\(symbol \(lib_id "EarlierPart"[\s\S]*?\(property "Reference" "U2"/);
         assert.match(updatedSchematic, /\(symbol \(lib_id "TestPart"[\s\S]*?\(property "Reference" "U1"/);
         assert.match(updatedSchematic, /\(property "Value" "EarlierPart"/);
