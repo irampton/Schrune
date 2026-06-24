@@ -6,8 +6,28 @@
   "bin": {
     "schrune": "src/app.js"
   },
+  "files": [
+    "src/",
+    "scripts/",
+    "readme.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "node --test",
     "setup:easyeda2kicad": "node scripts/install-easyeda2kicad.js"
-  }
+  },
+  "keywords": [
+    "kicad",
+    "schematic",
+    "pcb",
+    "electronics",
+    "cli"
+  ]
 }
