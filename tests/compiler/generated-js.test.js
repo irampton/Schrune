@@ -39,6 +39,25 @@ function makeFixture(source, partFiles = { "TestPart.schrune": basicPart }) {
     return { dir, filePath };
 }
 
+function assertGeneratedBuildError(fixturePath, expected) {
+    writeStep1JavaScript(fixturePath);
+    const generatedPath = path.join(path.dirname(fixturePath), "fixture.js");
+    delete require.cache[require.resolve(generatedPath)];
+    assert.throws(() => require(generatedPath)(), (error) => {
+        assert.equal(error.filePath, fixturePath);
+        if (expected.line !== undefined) {
+            assert.equal(error.line, expected.line);
+        }
+        if (expected.column !== undefined) {
+            assert.equal(error.column, expected.column);
+        }
+        if (expected.message) {
+            assert.match(error.message, expected.message);
+        }
+        return true;
+    });
+}
+
 test("writes runnable Step 1 JavaScript with --keep-js behavior", () => {
     const fixture = makeFixture(`#include "TestPart.schrune"
 
@@ -343,6 +362,61 @@ module top () {
         assert.deepEqual([...result.netList].sort(), ["power", "power.l"]);
         assert.equal(result.components[0].pins[0].net, "power");
         assert.equal(result.components[0].pins[1].net, "power.l");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("generated Step 1 JavaScript points bridge mistakes back to the source line", () => {
+    const fixture = makeFixture(`module top () {
+    net left;
+    net right;
+    r1 = new Resistor(value = "10k");
+    left ~ r1 ~ right;
+}
+`);
+
+    try {
+        assertGeneratedBuildError(fixture.filePath, {
+            line: 5,
+            message: /Use "~>" only when a two-pin part sits in the middle/,
+        });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("generated Step 1 JavaScript points net-group mistakes back to the source line", () => {
+    const fixture = makeFixture(`module top () {
+    net<i2c> bus;
+    net signal;
+    bus ~ signal;
+}
+`);
+
+    try {
+        assertGeneratedBuildError(fixture.filePath, {
+            line: 4,
+            message: /Cannot connect net<i2c> "bus" directly to "signal"/,
+        });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("generated Step 1 JavaScript explains when a bridge operator is used without a middle component", () => {
+    const fixture = makeFixture(`module top () {
+    net left;
+    net right;
+    left ~> right;
+}
+`);
+
+    try {
+        assertGeneratedBuildError(fixture.filePath, {
+            line: 4,
+            message: /Bridge connections need a component between the arrows/,
+        });
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
