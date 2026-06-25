@@ -651,9 +651,7 @@ function parseModules(source, filePath) {
         module.name,
         {
             name: module.name,
-            parameters: module.parameters
-                ? module.parameters.split(",").map((parameter) => parameter.trim()).filter(Boolean)
-                : [],
+            parameters: parseModuleParameters(module.parameters),
             body: module.body,
             filePath,
             source,
@@ -951,6 +949,36 @@ function evaluateArgumentList(args, scope, componentsByName) {
         name,
         evaluateValueExpression(expression, scope, componentsByName),
     ]));
+}
+
+function bindModuleArgument(parameter, expression, scope, context) {
+    if (parameter.kind === "val") {
+        return evaluateValueExpression(expression, scope, context.componentsByName);
+    }
+
+    const value = getNetValue(expression, context.nets, context.modulesByName);
+    if (value === undefined) {
+        throw new Error(`Unknown ${parameter.kind} argument "${expression}"`);
+    }
+
+    if (parameter.kind === "rail") {
+        if (!isRailValue(value)) {
+            throw new Error(`Module parameter "${parameter.name}" requires a rail argument`);
+        }
+        return value;
+    }
+
+    if (parameter.type) {
+        if (!isNetGroup(value) || value.type !== parameter.type) {
+            throw new Error(`Module parameter "${parameter.name}" requires net<${parameter.type}>`);
+        }
+        return value;
+    }
+
+    if (!isNetRef(value)) {
+        throw new Error(`Module parameter "${parameter.name}" requires a net argument`);
+    }
+    return value;
 }
 
 function moduleNetBinding(expression, modulesByName) {
@@ -1637,7 +1665,7 @@ function executeStatement(statement, context, scope = {}) {
         const moduleScope = {};
         moduleTemplate.parameters.forEach((parameter, index) => {
             if (index < argExpressions.length) {
-                moduleScope[parameter] = evaluateValueExpression(argExpressions[index], scope, componentsByName);
+                moduleScope[parameter.name] = bindModuleArgument(parameter, argExpressions[index], scope, context);
             }
         });
         const pathPrefix = `${scope.__pathPrefix || ""}${instanceName}_`;
@@ -1865,6 +1893,29 @@ function createNetRef(value, isOverride = false, name = value) {
         isOverride,
         aliasOf: undefined,
     };
+}
+
+function parseModuleParameter(parameter) {
+    const trimmed = parameter.trim();
+    const match = trimmed.match(/^(net(?:<([A-Za-z_]\w*)>)?|rail|val)\s+([A-Za-z_]\w*)$/);
+    if (!match) {
+        throw new Error(`Invalid module parameter "${trimmed}"`);
+    }
+
+    const kind = match[1] === "rail" ? "rail" : match[1] === "val" ? "val" : "net";
+    return {
+        kind,
+        type: match[2] ? normalizeNetType(match[2]) : undefined,
+        name: match[3],
+    };
+}
+
+function parseModuleParameters(parameters) {
+    if (!parameters) {
+        return [];
+    }
+
+    return parameters.split(",").map((parameter) => parseModuleParameter(parameter)).filter(Boolean);
 }
 
 function createNetGroup(name, type, signalNames, pathPrefix = "", nameOverrides = new Map()) {
@@ -2101,9 +2152,19 @@ function compileModule(moduleTemplate, context, options = {}) {
         context.nameOverrides.set(key, value);
         context.nameOverrides.set(`${pathPrefix}${key}`, value);
     }
+    const parameterNetDeclarations = moduleTemplate.parameters
+        .filter((parameter) => parameter.kind === "net" || parameter.kind === "rail")
+        .map((parameter) => ({
+            kind: parameter.kind,
+            type: parameter.type,
+            name: parameter.name,
+            defaultName: parameter.kind === "net" && !parameter.type ? uniqueNetName(`${pathPrefix}${parameter.name}`, new Set()) : undefined,
+            defaultHigh: parameter.kind === "rail" ? uniqueNetName(`${pathPrefix}${parameter.name}_h`, new Set()) : undefined,
+            defaultLow: parameter.kind === "rail" ? uniqueNetName(`${pathPrefix}${parameter.name}_l`, new Set()) : undefined,
+        }));
     let localNets;
     try {
-        localNets = applyNetNames(declarations, nameOverrides, pathPrefix);
+        localNets = applyNetNames([...parameterNetDeclarations, ...declarations], nameOverrides, pathPrefix);
     } catch (error) {
         throw attachSourceLocation(
             error,
@@ -2124,6 +2185,14 @@ function compileModule(moduleTemplate, context, options = {}) {
         ...(options.scope || {}),
         __pathPrefix: pathPrefix,
     };
+    for (const parameter of moduleTemplate.parameters) {
+        if (!(parameter.name in scope)) {
+            continue;
+        }
+        if (parameter.kind === "net" || parameter.kind === "rail") {
+            localNets[parameter.name] = scope[parameter.name];
+        }
+    }
 
     for (const statement of statements) {
         try {
@@ -2787,11 +2856,72 @@ function renderRuntimeHelpers() {
         `        return values;\n` +
         `    }\n` +
         `\n` +
-        `    function __setNameOverride(endpoint, value) {\n` +
-        `        if (!endpoint || endpoint.type !== "pin") {\n` +
+        `    function __renameNetRef(ref, value) {\n` +
+        `        if (!ref || !ref.__netRef) {\n` +
         `            return;\n` +
         `        }\n` +
-        `        nameOverrides.set(endpoint.key, value);\n` +
+        `        ref.value = value;\n` +
+        `        ref.name = value;\n` +
+        `        ref.isOverride = true;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __bindNetParam(name, value, overrideValue) {\n` +
+        `        if (!value || !value.__netRef) {\n` +
+        `            throw new Error(\`Module parameter "\${name}" requires a net argument\`);\n` +
+        `        }\n` +
+        `        if (overrideValue) {\n` +
+        `            __renameNetRef(value, overrideValue);\n` +
+        `        }\n` +
+        `        return value;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __bindRailParam(name, value, highOverrideValue, lowOverrideValue) {\n` +
+        `        if (!value || value.__netRef || value.__netGroup || !value.h || !value.l) {\n` +
+        `            throw new Error(\`Module parameter "\${name}" requires a rail argument\`);\n` +
+        `        }\n` +
+        `        if (highOverrideValue) {\n` +
+        `            __renameNetRef(value.h, highOverrideValue);\n` +
+        `        }\n` +
+        `        if (lowOverrideValue) {\n` +
+        `            __renameNetRef(value.l, lowOverrideValue);\n` +
+        `        }\n` +
+        `        return value;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __bindNetGroupParam(name, type, value, baseOverrideValue, signalOverrides = {}) {\n` +
+        `        if (!value || !value.__netGroup || value.type !== type) {\n` +
+        `            throw new Error(\`Module parameter "\${name}" requires net<\${type}>\`);\n` +
+        `        }\n` +
+        `        for (const signalName of netTypeSignals[type]) {\n` +
+        `            const overrideValue = signalOverrides[signalName] || (baseOverrideValue ? baseOverrideValue + "." + signalName : "");\n` +
+        `            if (overrideValue) {\n` +
+        `                __renameNetRef(value[signalName], overrideValue);\n` +
+        `            }\n` +
+        `        }\n` +
+        `        return value;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __setNameOverride(endpoint, value) {\n` +
+        `        if (!endpoint) {\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        if (endpoint.type === "pin") {\n` +
+        `            nameOverrides.set(endpoint.key, value);\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        if (endpoint.type !== "net") {\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        const ref = endpoint.ref;\n` +
+        `        if (ref && ref.__netRef) {\n` +
+        `            __renameNetRef(ref, value);\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        if (ref && ref.__netGroup) {\n` +
+        `            for (const signalName of netTypeSignals[ref.type]) {\n` +
+        `                __renameNetRef(ref[signalName], value + "." + signalName);\n` +
+        `            }\n` +
+        `        }\n` +
         `    }\n` +
         `\n` +
         `    function __net(ref) {\n` +
@@ -3086,13 +3216,38 @@ function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTe
     const statements = splitStatements(moduleTemplate.body);
     const { declarations, nameOverrides } = collectTopDeclarations(statements);
     const isTopLevel = functionName === "__module_top" || moduleTemplate.name === "top";
+    const parameterNetNames = new Set(moduleTemplate.parameters.filter((parameter) => parameter.kind === "net" && !parameter.type).map((parameter) => parameter.name));
+    const parameterNetGroups = new Map(moduleTemplate.parameters.filter((parameter) => parameter.kind === "net" && parameter.type).map((parameter) => [parameter.name, parameter.type]));
+    const parameterRailNames = new Set(moduleTemplate.parameters.filter((parameter) => parameter.kind === "rail").map((parameter) => parameter.name));
     const moduleContext = {
         ...context,
-        netNames: new Set(declarations.filter((declaration) => declaration.kind === "net").map((declaration) => declaration.name)),
-        netGroups: new Map(declarations.filter((declaration) => declaration.kind === "net" && declaration.type).map((declaration) => [declaration.name, declaration.type])),
-        railNames: new Set(declarations.filter((declaration) => declaration.kind === "rail").map((declaration) => declaration.name)),
+        netNames: new Set([...declarations.filter((declaration) => declaration.kind === "net" && !declaration.type).map((declaration) => declaration.name), ...parameterNetNames]),
+        netGroups: new Map([...declarations.filter((declaration) => declaration.kind === "net" && declaration.type).map((declaration) => [declaration.name, declaration.type]), ...parameterNetGroups]),
+        railNames: new Set([...declarations.filter((declaration) => declaration.kind === "rail").map((declaration) => declaration.name), ...parameterRailNames]),
     };
-    const parameters = moduleTemplate.parameters.join(", ");
+    const parameters = moduleTemplate.parameters.map((parameter) => `__param_${parameter.name}`).join(", ");
+    const parameterBindingLines = moduleTemplate.parameters.map((parameter) => {
+        if (parameter.kind === "val") {
+            return `    const ${parameter.name} = __param_${parameter.name};`;
+        }
+
+        if (parameter.kind === "rail") {
+            const highOverride = nameOverrides.get(`${parameter.name}.h`);
+            const lowOverride = nameOverrides.get(`${parameter.name}.l`);
+            return `    const ${parameter.name} = __bindRailParam(${jsString(parameter.name)}, __param_${parameter.name}, ${highOverride ? jsString(highOverride) : "undefined"}, ${lowOverride ? jsString(lowOverride) : "undefined"});`;
+        }
+
+        if (parameter.type) {
+            const groupOverride = nameOverrides.get(parameter.name);
+            const signalOverrides = Object.fromEntries(netTypeSignals(parameter.type)
+                .map((signalName) => [signalName, nameOverrides.get(`${parameter.name}.${signalName}`)])
+                .filter(([, value]) => value !== undefined));
+            return `    const ${parameter.name} = __bindNetGroupParam(${jsString(parameter.name)}, ${jsString(parameter.type)}, __param_${parameter.name}, ${groupOverride ? jsString(groupOverride) : "undefined"}, ${renderObjectLiteral(signalOverrides, 4)});`;
+        }
+
+        const override = nameOverrides.get(parameter.name);
+        return `    const ${parameter.name} = __bindNetParam(${jsString(parameter.name)}, __param_${parameter.name}, ${override ? jsString(override) : "undefined"});`;
+    });
     const declarationLines = declarations.map((declaration) => {
         if (declaration.kind === "net") {
             if (declaration.type) {
@@ -3113,6 +3268,7 @@ function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTe
 
     return [
         `function ${functionName}(${parameters}) {`,
+        ...parameterBindingLines,
         ...declarationLines,
         "",
         ...statementLines,

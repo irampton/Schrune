@@ -402,3 +402,40 @@ module top () {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
 });
+
+test("kept Step 1 JavaScript supports typed module parameters for rails and net groups", () => {
+    const fixture = makeFixture(`#include "TestPart.schrune"
+
+module child(net GPIO, rail power, val current, net<i2c> bus) {
+    part u = new TestPart();
+    GPIO ~ u.IN;
+    power.l.name = "GND";
+    power.l ~ u.OUT;
+    bus.SDA ~ u[1];
+}
+
+module top () {
+    rail power;
+    net gpio1;
+    net<i2c> i2c_bus;
+    val current = 0.5;
+    mod c = new child(gpio1, power, current, i2c_bus);
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+
+        assert.equal(result.components.length, 1);
+        assert.equal(result.components[0].pins.IN.net, "gpio1");
+        assert.equal(result.components[0].pins.OUT.net, "GND");
+        assert.equal(result.components[0].pins[1].net, "i2c_bus.SDA");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
