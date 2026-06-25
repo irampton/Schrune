@@ -12,7 +12,6 @@
 * Default order for basic parts () declaration
 * Some way to back-port the designators
 * Add an export function
-* JLC BOM tool
 * Code cleanup
   * Add a ton of tests to validate builds
   * Go through an streamline code + break up large files
