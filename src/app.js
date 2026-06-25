@@ -1872,11 +1872,13 @@ function createNetGroup(name, type, signalNames, pathPrefix = "", nameOverrides 
         __netGroup: true,
         type,
     };
+    const groupOverride = nameOverrides.get(name);
 
     for (const signalName of signalNames) {
         const key = `${name}.${signalName}`;
         const overrideName = nameOverrides.get(key);
-        const finalName = overrideName ? `${pathPrefix}${overrideName}` : `${pathPrefix}${name}.${signalName}`;
+        const baseName = groupOverride ? `${groupOverride}.${signalName}` : `${name}.${signalName}`;
+        const finalName = overrideName ? `${pathPrefix}${overrideName}` : `${pathPrefix}${baseName}`;
         const ref = createNetRef(finalName, false, pathPrefix ? key : finalName);
         ref.group = name;
         ref.signal = signalName;
@@ -2735,14 +2737,15 @@ function renderRuntimeHelpers() {
         `        return ref;\n` +
         `    }\n` +
         `\n` +
-        `    function __declareNetGroup(name, type) {\n` +
+        `    function __declareNetGroup(name, type, baseName = name) {\n` +
         `        const scopedName = __scopeName(name);\n` +
         `        const group = {\n` +
         `            __netGroup: true,\n` +
         `            type,\n` +
         `        };\n` +
         `        for (const signalName of netTypeSignals[type]) {\n` +
-        `            group[signalName] = __netRef(scopedName + "." + signalName, scopedName + "." + signalName, false);\n` +
+        `            const scopedSignalName = __scopeName(baseName + "." + signalName);\n` +
+        `            group[signalName] = __netRef(scopedSignalName, scopedSignalName, false);\n` +
         `            group[signalName].group = scopedName;\n` +
         `            group[signalName].signal = signalName;\n` +
         `        }\n` +
@@ -3093,7 +3096,8 @@ function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTe
     const declarationLines = declarations.map((declaration) => {
         if (declaration.kind === "net") {
             if (declaration.type) {
-                return `    const ${declaration.name} = __declareNetGroup(${jsString(declaration.name)}, ${jsString(declaration.type)});`;
+                const baseName = nameOverrides.get(declaration.name) || declaration.name;
+                return `    const ${declaration.name} = __declareNetGroup(${jsString(declaration.name)}, ${jsString(declaration.type)}, ${jsString(baseName)});`;
             }
             const finalName = nameOverrides.get(declaration.name) || declaration.defaultName;
             return `    const ${declaration.name} = __declareNet(${jsString(declaration.name)}, __scopeName(${jsString(finalName)}), ${isTopLevel && (nameOverrides.has(declaration.name) || Boolean(declaration.inlineAnchor))}, ${jsString(isTopLevel ? finalName : declaration.name)});`;

@@ -378,3 +378,27 @@ module top () {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
 });
+
+test("kept Step 1 JavaScript applies whole-group typed net renames", () => {
+    const fixture = makeFixture(`#include "TestPart.schrune"
+
+module top () {
+    net<i2c> i2c_bus;
+    i2c_bus.name = "sensors";
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+
+        assert.deepEqual([...result.netList].sort(), ["sensors.SDA", "sensors.SCL"].sort());
+        assert.deepEqual(result.nets.i2c_bus, { type: "i2c", SDA: "sensors.SDA", SCL: "sensors.SCL" });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});

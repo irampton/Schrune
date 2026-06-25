@@ -615,6 +615,24 @@ module top () {
     });
 });
 
+test("applies whole-group name overrides to typed nets", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module top () {
+    net<i2c> i2c_bus;
+    i2c_bus.name = "sensors";
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        assert.deepEqual([...result.netList].sort(), ["sensors.SCL", "sensors.SDA"].sort());
+        assert.deepEqual(result.nets.i2c_bus, {
+            type: "i2c",
+            SDA: "sensors.SDA",
+            SCL: "sensors.SCL",
+        });
+    });
+});
+
 test("applies component place overrides", () => {
     withFixture(`#include "TestPart.schrune"
 
