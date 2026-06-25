@@ -62,6 +62,14 @@ function writeProjectConfig(projectPath, config) {
     fs.writeFileSync(path.resolve(projectPath), `${JSON.stringify(config, null, 2)}\n`);
 }
 
+function findProjectConfigInDirectory(dirPath) {
+    const candidate = path.join(path.resolve(dirPath), PROJECT_FILE);
+    if (!fs.existsSync(candidate)) {
+        return undefined;
+    }
+    return parseProjectConfig(candidate);
+}
+
 function findProjectConfig(startDir) {
     let currentDir = path.resolve(startDir);
 
@@ -127,6 +135,7 @@ module.exports = {
     addPartToProjectConfig,
     buildPathsForEntry,
     findProjectConfig,
+    findProjectConfigInDirectory,
     manifestBuildRecord,
     parseProjectConfig,
     relativeManifestPath,

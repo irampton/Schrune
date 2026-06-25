@@ -235,6 +235,53 @@ function renderSchrunePart(partName, info, pins) {
         `}\n`;
 }
 
+function mergeInfoIntoSchruneSource(source, info) {
+    const infoMatch = source.match(/info\s*:\s*\{([\s\S]*?)\n(\s*)\}/);
+    if (!infoMatch) {
+        return source;
+    }
+
+    const originalBody = infoMatch[1];
+    const closingIndent = infoMatch[2];
+    const existing = new Map();
+    const fieldPattern = /(^|\n)(\s*)([A-Za-z_]\w*)\s*:\s*("[^"]*"|'[^']*'|[^,\n]+)\s*,?/g;
+    let match;
+
+    while ((match = fieldPattern.exec(originalBody)) !== null) {
+        existing.set(match[3], {
+            indent: match[2],
+            rawValue: match[4].trim(),
+        });
+    }
+
+    for (const [key, value] of Object.entries(info)) {
+        if (value === undefined) {
+            continue;
+        }
+        existing.set(key, {
+            indent: existing.get(key) ? existing.get(key).indent : `${closingIndent}    `,
+            rawValue: jsString(value),
+        });
+    }
+
+    const lines = [];
+    for (const [key, entry] of existing.entries()) {
+        lines.push(`${entry.indent}${key}: ${entry.rawValue},`);
+    }
+    const nextBlock = `info: {\n${lines.join("\n")}\n${closingIndent}}`;
+    return source.replace(/info\s*:\s*\{[\s\S]*?\n\s*\}/, nextBlock);
+}
+
+function updateExistingSchruneFile(schrunePath, partName, info, pins) {
+    if (!fs.existsSync(schrunePath)) {
+        fs.writeFileSync(schrunePath, renderSchrunePart(partName, info, pins));
+        return;
+    }
+
+    const current = fs.readFileSync(schrunePath, "utf8");
+    fs.writeFileSync(schrunePath, mergeInfoIntoSchruneSource(current, info));
+}
+
 function normalizePythonCommand(command) {
     if (!command || typeof command !== "string") {
         return undefined;
@@ -414,13 +461,18 @@ async function addLcscPart(partNumber, options = {}) {
         throw new Error("easyeda2kicad bridge did not complete successfully");
     }
 
-    fs.writeFileSync(schrunePath, renderSchrunePart(partName, info, pins));
+    if (options.updateExistingSchrune) {
+        updateExistingSchruneFile(schrunePath, partName, info, pins);
+    } else {
+        fs.writeFileSync(schrunePath, renderSchrunePart(partName, info, pins));
+    }
 
     return {
         partName,
         directory: destinationDir,
         schrunePath,
         pins,
+        lcsc: partNumber.toUpperCase(),
         modelDownloaded: model.downloaded,
     };
 }

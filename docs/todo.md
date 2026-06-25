@@ -9,8 +9,6 @@
 * Test point class
 * Figure out better imports, so 1 script can install missing dependencies
   * Shared modules (or even parts!) across files
-* Move BOM to build folder
-* Create a project based structure file with entry point, build file locations, etc.
 * Mark as a do not place
 * Better error logging by making a bunch of tests to test bad syntax and adding try/catch blocks
 
