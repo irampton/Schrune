@@ -353,6 +353,38 @@ test("step3 honors LCSC-selected generic primitives without searching JLC", asyn
     }
 });
 
+test("makeBomRows excludes do-not-place components", () => {
+    const rows = makeBomRows({
+        components: [
+            {
+                designator: "R1",
+                place: false,
+                value: "0Ohm",
+                power: "0.1W",
+                voltage: undefined,
+                tolerance: undefined,
+                info: { package: "0603", partNumber: "RC0603", LCSC: "C1", manufacture: "YAGEO" },
+                selectedPart: { package: "0603", mpn: "RC0603", lcsc: "C1", manufacturer: "YAGEO" },
+                constructor: { name: "Resistor" },
+            },
+            {
+                designator: "R2",
+                value: "10k",
+                power: "0.1W",
+                voltage: undefined,
+                tolerance: undefined,
+                info: { package: "0603", partNumber: "RC0603", LCSC: "C2", manufacture: "YAGEO" },
+                selectedPart: { package: "0603", mpn: "RC0603", lcsc: "C2", manufacturer: "YAGEO" },
+                constructor: { name: "Resistor" },
+            },
+        ],
+    });
+
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0].designators, ["R2"]);
+    assert.equal(rows[0].lcsc, "C2");
+});
+
 test("step3 enriches explicit LCSC-selected generic parts from JLC metadata when local metadata is incomplete", async () => {
     const fixture = makeFixture(`module top () {
     part r1 = new Resistor(value = "1kOhms", LCSC="C17513");

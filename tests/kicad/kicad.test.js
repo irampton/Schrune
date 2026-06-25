@@ -281,6 +281,30 @@ module top () {
     }
 });
 
+test("marks do-not-place components in schematic and PCB output", () => {
+    const fixture = makeFixture({
+        source: `#include "TestPart.schrune"
+
+module top () {
+    part u = new TestPart();
+    u.place = false;
+}
+`,
+    });
+
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled);
+        const schematic = fs.readFileSync(result.schematicPath, "utf8");
+        const pcb = fs.readFileSync(result.pcbPath, "utf8");
+
+        assert.match(schematic, /\(in_bom no\) \(on_board yes\) \(dnp yes\)/);
+        assert.match(pcb, /\(attr dnp\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("embeds downloaded footprint geometry without synthetic repair", () => {
     const fixture = makeFixture();
     try {

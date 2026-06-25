@@ -230,6 +230,22 @@ Common properties used by the compiler include:
 * `tolerance`
 * `package`
 
+Part instances also support post-construction property assignment for a small set
+of compiler-recognized fields.
+
+```schrune
+part r = new Resistor(value = "0Ohm");
+r.place = false;
+```
+
+Supported instance property assignments include:
+
+* `.place`
+
+Setting `.place = false` marks the part as do not place (DNP). DNP parts stay in
+the generated schematic and PCB, but they are omitted from the generated BOM and
+emitted into KiCad with DNP markers.
+
 ## `val`
 
 `val` declares a numeric value with a unit, intended for expressions and validation.

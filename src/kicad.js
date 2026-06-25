@@ -492,9 +492,10 @@ function renderSchematicSymbol(component, symbol, placement, projectName) {
         .map(([pinNumber, pin]) => `${pinNumber}:${pin.x}:${pin.y}:${pin.angle}:${pin.length}`)
         .join("|");
     const symbolInstanceSeed = `${projectName}:sch:${component.designator}:${symbol.name}:${placement.x}:${placement.y}:${placement.rotation}:${symbolGeometry}`;
+    const dnp = component.place === false;
     return [
         `  (symbol (lib_id ${kicadString(symbol.name)}) (at ${placement.x.toFixed(2)} ${placement.y.toFixed(2)} ${placement.rotation}) (unit 1)`,
-        `    (in_bom yes) (on_board yes) (dnp no)`,
+        `    (in_bom ${dnp ? "no" : "yes"}) (on_board yes) (dnp ${dnp ? "yes" : "no"})`,
         `    (uuid ${kicadId(symbolInstanceSeed)})`,
         renderSchematicProperty(projectName, component, "Reference", component.designator, placement.x, placement.y - 5.08),
         renderSchematicProperty(projectName, component, "Value", component.value || component.info.partNumber || componentKind(component), placement.x, placement.y + 5.08),
@@ -608,6 +609,9 @@ function transformFootprintForBoard(component, asset, placement, netNumbers, pro
 
     const pinNetByPad = new Map(flattenPins(component.pins).map((pin, index) => [physicalPadNumber(component, pin, index), pin.net]));
     body = addPadNets(body, pinNetByPad, netNumbers);
+    if (component.place === false && !/\(attr\b[^)]*\bdnp\b/.test(body)) {
+        body = `  (attr dnp)\n${body}`;
+    }
 
     const indentedBody = body.split("\n").map((line) => `    ${line}`).join("\n");
     return [

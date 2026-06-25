@@ -289,6 +289,7 @@ function isCompleteLineStatement(statement) {
         /^val\s+[A-Za-z_]\w*\s*=\s*.+$/,
         /^.+?\.name\s*=\s*.+$/,
         /^[A-Za-z_]\w*\.voltage\s*=\s*.+$/,
+        /^[A-Za-z_]\w*\.place\s*=\s*(?:true|false)$/,
         /^(?:part\s+)?[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*\s*\([\s\S]*\)$/,
         /^(?:part\s+)?[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*$/,
         /^part\[\d+\]\s+[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*\s*\([\s\S]*\)$/,
@@ -725,6 +726,7 @@ function createComponent(template, params = {}) {
                     footprint: footprint || template.info.footprint,
                     LCSC: params.LCSC || params.lcsc || template.info.LCSC,
                 };
+                this.place = true;
                 this.pins = [];
                 if (template.primitive) {
                     Object.assign(this, params);
@@ -1658,6 +1660,16 @@ function executeStatement(statement, context, scope = {}) {
             throw new Error(`Unknown rail "${voltageMatch[1]}"`);
         }
         rail.voltage = parseValue(voltageMatch[2]);
+        return;
+    }
+
+    const placeMatch = statement.match(/^([A-Za-z_]\w*)\.place\s*=\s*(true|false)$/);
+    if (placeMatch) {
+        const component = componentsByName.get(placeMatch[1]);
+        if (!component) {
+            throw new Error(`Unknown component "${placeMatch[1]}"`);
+        }
+        component.place = placeMatch[2] === "true";
         return;
     }
 
@@ -2616,6 +2628,11 @@ function renderStatement(statement, indent = 4, context = { netNames: new Set(),
     const voltageMatch = statement.match(/^([A-Za-z_]\w*)\.voltage\s*=\s*(.+)$/);
     if (voltageMatch) {
         return [`${padding}${voltageMatch[1]}.voltage = ${jsString(parseValue(voltageMatch[2]))};`];
+    }
+
+    const placeMatch = statement.match(/^([A-Za-z_]\w*)\.place\s*=\s*(true|false)$/);
+    if (placeMatch) {
+        return [`${padding}${placeMatch[1]}.place = ${placeMatch[2]};`];
     }
 
     if (/^for\s*\(/.test(statement)) {

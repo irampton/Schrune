@@ -815,6 +815,9 @@ function makeBomRows(compiled) {
     const groups = new Map();
 
     for (const component of compiled.components) {
+        if (component.place === false) {
+            continue;
+        }
         const key = bomIdentity(component);
         if (!groups.has(key)) {
             const selected = component.selectedPart || {};

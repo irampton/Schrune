@@ -615,6 +615,19 @@ module top () {
     });
 });
 
+test("applies component place overrides", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module top () {
+    part r = new Resistor(value = "0Ohm");
+    r.place = false;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        assert.equal(result.components[0].place, false);
+    });
+});
+
 test("allows module-local renamed rails to join a higher-level net", () => {
     withFixture(`#include "TestPart.schrune"
 
