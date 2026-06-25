@@ -3364,6 +3364,11 @@ function installedImportedPartExists(partsRoot, partName) {
         && fs.existsSync(path.join(directory, `${partName}.kicad_mod`));
 }
 
+function includeStatementForPart(baseDir, schrunePath) {
+    const relativePath = path.relative(path.resolve(baseDir), path.resolve(schrunePath)).replace(/\\/g, "/");
+    return `#include "${relativePath}"`;
+}
+
 async function installProjectParts(project, options = {}) {
     const target = resolveBuildTarget({ cwd: project.dir });
     const projectPartsRoot = path.join(path.dirname(target.entryFilePath), "parts");
@@ -3470,6 +3475,7 @@ async function main() {
             }
             console.log(`Added ${result.partName}`);
             console.log(`Pins: ${result.pins.length}`);
+            console.log(includeStatementForPart(baseDir, result.schrunePath));
             if (!result.modelDownloaded) {
                 console.log("3D STEP model payload was not directly downloadable.");
             }
@@ -3611,6 +3617,7 @@ module.exports = {
     writeDesignatorState,
     materializeStep1JavaScript,
     createProgress,
+    includeStatementForPart,
     installProjectParts,
     openPathWithDefaultApplication,
     UsageError,
