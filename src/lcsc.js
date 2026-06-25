@@ -2,6 +2,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const { commentFields } = require("./part-comment");
 
 const EASYEDA_COMPONENT_API = "https://easyeda.com/api/products";
 const EASYEDA_STEP_MODEL_API = "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y";
@@ -182,19 +183,23 @@ function inferPinGroups(pins) {
     ];
 }
 
-function componentInfo(component, assets) {
+function componentInfo(component, assets, selectedPart) {
     const cPara = component.dataStr && component.dataStr.head && component.dataStr.head.c_para
         ? component.dataStr.head.c_para
         : {};
+    const kind = selectedPart && selectedPart.kind;
+    const generatedInfo = kind ? commentFields(kind, selectedPart) : {};
 
     return {
         partNumber: cPara["Manufacturer Part"] || cPara.name || component.title,
         manufacture: cPara.Manufacturer || cPara.Supplier || "Unknown",
         footprint: assets.footprint,
+        package: selectedPart && selectedPart.package || cPara.package,
         symbol: assets.symbol,
         model: assets.model,
         LCSC: component.lcsc && component.lcsc.number || component.szlcsc && component.szlcsc.number,
         designatorPrefix: cPara.pre ? String(cPara.pre).replace(/\?$/, "") : "U",
+        ...generatedInfo,
     };
 }
 
@@ -402,7 +407,7 @@ async function addLcscPart(partNumber, options = {}) {
         symbol: `./${partName}.kicad_sym`,
         footprint: `./${partName}.kicad_mod`,
         model: model.fileName ? `./${model.fileName}` : undefined,
-    });
+    }, options.part);
     const schrunePath = path.join(destinationDir, `${partName}.schrune`);
     const bridged = await runEasyeda2KicadBridge(partName, component, destinationDir, modelProjectDir, options);
     if (!bridged) {

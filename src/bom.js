@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { addLcscPart } = require("./lcsc");
 const { searchJlcParts, selectBestJlcPart } = require("./jlc");
+const { commentFields } = require("./part-comment");
 
 const GENERIC_TYPES = new Set(["Resistor", "Capacitor", "Inductor", "Diode"]);
 const LOCK_VERSION = 1;
@@ -378,6 +379,19 @@ function normalizeSelectedPart(part) {
         unitCost: part.unitCost ?? part.unit_cost,
         isBasic: part.isBasic ?? part.is_basic,
         isPreferred: part.isPreferred ?? part.is_preferred,
+        attributes: { ...(part.attributes || {}) },
+        comment: part.comment,
+        package: part.package,
+        value: part.value,
+        tolerance: part.tolerance,
+        wattage: part.wattage,
+        maxVoltage: part.maxVoltage,
+        temperatureCoefficient: part.temperatureCoefficient,
+        currentRating: part.currentRating,
+        dcr: part.dcr,
+        reverseVoltage: part.reverseVoltage,
+        voltageDrop: part.voltageDrop,
+        current: part.current,
     };
 }
 
@@ -449,6 +463,39 @@ function rankedParts(parts) {
     return ranked;
 }
 
+function partHasCatalogMetadata(part) {
+    if (!part) {
+        return false;
+    }
+
+    const attributes = part.attributes || {};
+    return Boolean(
+        String(part.package || "").trim()
+        || String(part.manufacturer || "").trim()
+        || String(part.mpn || "").trim()
+        || Object.keys(attributes).some((key) => String(attributes[key] ?? "").trim() && String(attributes[key]).trim() !== "-")
+    );
+}
+
+async function enrichPartFromCatalog(part, options = {}) {
+    const normalized = normalizeSelectedPart(part);
+    if (!normalized || !normalized.lcsc || partHasCatalogMetadata(normalized)) {
+        return normalized;
+    }
+
+    const search = options.searchJlcParts || searchJlcParts;
+    try {
+        const candidates = await search(normalized.lcsc, {
+            fetch: options.fetch,
+            limit: 20,
+        });
+        const exact = candidates.find((candidate) => String(candidate.lcsc || "").toUpperCase() === normalized.lcsc);
+        return exact ? { ...normalizeSelectedPart({ ...normalized, ...exact }), __catalogEnriched: true } : normalized;
+    } catch (_error) {
+        return normalized;
+    }
+}
+
 function importedAssetsExist(importResult) {
     if (!importResult || !importResult.directory || !importResult.partName) {
         return false;
@@ -468,7 +515,55 @@ function installedAssetsExist(partsDir, part) {
         && fs.existsSync(path.join(directory, `${part.partName}.kicad_mod`));
 }
 
-async function importSelectedPart(part, filePath, partsDir, options) {
+function expectedImportedInfoEntries(part, kind) {
+    const entries = [];
+    const add = (key, value) => {
+        if (value !== undefined && value !== null && String(value).trim()) {
+            entries.push([key, String(value)]);
+        }
+    };
+
+    add("package", part.package);
+    add("comment", part.comment);
+
+    if (kind === "Resistor") {
+        add("value", part.value);
+        add("tolerance", part.tolerance);
+        add("wattage", part.wattage);
+    } else if (kind === "Capacitor") {
+        add("value", part.value);
+        add("tolerance", part.tolerance);
+        add("maxVoltage", part.maxVoltage);
+        add("temperatureCoefficient", part.temperatureCoefficient);
+    } else if (kind === "Inductor") {
+        add("value", part.value);
+        add("tolerance", part.tolerance);
+        add("currentRating", part.currentRating);
+        add("dcr", part.dcr);
+    } else if (kind === "Diode") {
+        add("reverseVoltage", part.reverseVoltage);
+        add("voltageDrop", part.voltageDrop);
+        add("current", part.current);
+    }
+
+    return entries;
+}
+
+function importedPartInfoMatches(partsDir, part, kind) {
+    if (!part || !part.partName) {
+        return false;
+    }
+
+    const schrunePath = path.join(partsDir, part.partName, `${part.partName}.schrune`);
+    if (!fs.existsSync(schrunePath)) {
+        return false;
+    }
+
+    const source = fs.readFileSync(schrunePath, "utf8");
+    return expectedImportedInfoEntries(part, kind).every(([key, value]) => source.includes(`${key}: ${JSON.stringify(value)}`));
+}
+
+async function importSelectedPart(component, part, filePath, partsDir, options) {
     if (options.downloadParts === false) {
         return { ok: true };
     }
@@ -478,6 +573,10 @@ async function importSelectedPart(part, filePath, partsDir, options) {
         cwd: path.dirname(filePath),
         partsDir,
         fetch: options.fetch,
+        part: {
+            ...part,
+            kind: componentKind(component),
+        },
     });
 
     return {
@@ -503,24 +602,26 @@ async function autoSelectionCandidates(component, options) {
     return rankedParts(parts);
 }
 
-function initialSelectionCandidates(component, lock, noPartsLock) {
+async function initialSelectionCandidates(component, lock, noPartsLock, options = {}) {
     if (component.info && component.info.LCSC) {
+        const explicit = normalizeSelectedPart(findPartByLcsc(lock, component.info.LCSC) || {
+            lcsc: component.info.LCSC,
+            manufacturer: component.info.manufacture,
+            mpn: component.info.partNumber,
+            package: component.info.package || "",
+        });
         return {
             explicit: true,
-            parts: [normalizeSelectedPart(findPartByLcsc(lock, component.info.LCSC) || {
-                lcsc: component.info.LCSC,
-                manufacturer: component.info.manufacture,
-                mpn: component.info.partNumber,
-                package: component.info.footprint || component.footprint,
-            })],
+            parts: [await enrichPartFromCatalog(explicit, options)],
         };
     }
 
     const lockedPart = noPartsLock ? undefined : findLockedPart(lock, component);
     const cachedPart = noPartsLock || lockedPart ? undefined : findCachedSelection(lock, component);
+    const part = lockedPart ? normalizeSelectedPart(lockedPart) : cachedPart ? normalizeSelectedPart(cachedPart) : undefined;
     return {
         explicit: false,
-        parts: lockedPart ? [normalizeSelectedPart(lockedPart)] : cachedPart ? [normalizeSelectedPart(cachedPart)] : [],
+        parts: part ? [await enrichPartFromCatalog(part, options)] : [],
     };
 }
 
@@ -528,13 +629,26 @@ function applyPartToComponent(component, part) {
     if (!part) {
         return;
     }
-    component.selectedPart = part;
+    const selected = selectedPartInfo(component, part);
+    component.selectedPart = selected;
     component.info = {
         ...component.info,
-        partNumber: part.mpn || component.info.partNumber,
-        manufacture: part.manufacturer || component.info.manufacture,
-        footprint: part.package || component.info.footprint,
-        LCSC: part.lcsc || component.info.LCSC,
+        partNumber: selected.mpn || component.info.partNumber,
+        manufacture: selected.manufacturer || component.info.manufacture,
+        footprint: selected.package || component.info.footprint,
+        package: selected.package || component.info.package,
+        comment: selected.comment || component.info.comment,
+        value: selected.value || component.info.value,
+        tolerance: selected.tolerance || component.info.tolerance,
+        wattage: selected.wattage || component.info.wattage,
+        maxVoltage: selected.maxVoltage || component.info.maxVoltage,
+        temperatureCoefficient: selected.temperatureCoefficient || component.info.temperatureCoefficient,
+        currentRating: selected.currentRating || component.info.currentRating,
+        dcr: selected.dcr || component.info.dcr,
+        reverseVoltage: selected.reverseVoltage || component.info.reverseVoltage,
+        voltageDrop: selected.voltageDrop || component.info.voltageDrop,
+        current: selected.current || component.info.current,
+        LCSC: selected.lcsc || component.info.LCSC,
     };
 }
 
@@ -573,7 +687,7 @@ async function resolveGenericParts(filePath, compiled, options = {}) {
         options.onProgress && options.onProgress({ current: index, total: genericComponents.length, component });
         const selectionKey = componentSelectionKey(component);
 
-        const candidates = initialSelectionCandidates(component, lock, noPartsLock);
+        const candidates = await initialSelectionCandidates(component, lock, noPartsLock, options);
         let selectedPart;
         const importErrors = [];
         async function tryCandidates(parts) {
@@ -582,11 +696,16 @@ async function resolveGenericParts(filePath, compiled, options = {}) {
                     continue;
                 }
 
-                if (installedAssetsExist(partsDir, candidate)) {
+                if (
+                    installedAssetsExist(partsDir, candidate)
+                    && partHasCatalogMetadata(candidate)
+                    && !candidate.__catalogEnriched
+                    && importedPartInfoMatches(partsDir, candidate, componentKind(component))
+                ) {
                     return candidate;
                 }
 
-                const imported = await importSelectedPart(candidate, filePath, partsDir, options);
+                const imported = await importSelectedPart(component, candidate, filePath, partsDir, options);
                 if (imported.ok) {
                     if (imported.result) {
                         candidate.partName = imported.result.partName;
@@ -615,12 +734,13 @@ async function resolveGenericParts(filePath, compiled, options = {}) {
             throw new Error(`Could not select a JLC/LCSC part for ${component.designator}${detail}`);
         }
 
-        applyPartToComponent(component, selectedPart);
-        selectedParts.push(selectedPart);
-        selectors[component.designator] = selectedPart.lcsc;
+        const enrichedPart = selectedPartInfo(component, selectedPart);
+        applyPartToComponent(component, enrichedPart);
+        selectedParts.push(enrichedPart);
+        selectors[component.designator] = enrichedPart.lcsc;
         selectionCache[selectionKey] = {
-            lcsc: selectedPart.lcsc,
-            partName: selectedPart.partName,
+            lcsc: enrichedPart.lcsc,
+            partName: enrichedPart.partName,
         };
         persistLock();
         options.onProgress && options.onProgress({ current: index + 1, total: genericComponents.length, component });
@@ -658,6 +778,38 @@ function bomIdentity(component) {
     ].join("\0");
 }
 
+function selectedPartInfo(component, part) {
+    const kind = componentKind(component);
+    const fields = commentFields(kind, {
+        ...part,
+        value: part.value ?? component.value,
+        tolerance: part.tolerance ?? component.tolerance,
+        power: part.power ?? component.power,
+        voltage: part.voltage ?? component.voltage,
+    });
+    return {
+        ...part,
+        ...fields,
+        package: part.package || component.info && component.info.package || "",
+    };
+}
+
+function bomComment(component) {
+    if (component.info && component.info.comment) {
+        return component.info.comment;
+    }
+    if (component.selectedPart && component.selectedPart.comment) {
+        return component.selectedPart.comment;
+    }
+    return commentFields(componentKind(component), {
+        ...(component.selectedPart || {}),
+        value: component.value,
+        tolerance: component.tolerance,
+        power: component.power,
+        voltage: component.voltage,
+    }).comment || "";
+}
+
 function makeBomRows(compiled) {
     const groups = new Map();
 
@@ -668,17 +820,11 @@ function makeBomRows(compiled) {
             groups.set(key, {
                 designators: [],
                 quantity: 0,
-                manufacturer: selected.manufacturer || component.info && component.info.manufacture || "",
                 mpn: selected.mpn || component.info && component.info.partNumber || "",
                 lcsc: selected.lcsc || component.info && component.info.LCSC || "",
-                value: component.value || "",
-                footprint: selected.package || component.footprint || component.info && component.info.footprint || "",
-                type: componentKind(component),
-                description: selected.description || "",
-                stock: selected.stock ?? "",
-                unitCost: selected.unitCost ?? "",
-                isBasic: selected.isBasic ?? "",
-                isPreferred: selected.isPreferred ?? "",
+                manufacturer: selected.manufacturer || component.info && component.info.manufacture || "",
+                footprint: selected.package || component.info && component.info.package || "",
+                comment: bomComment(component),
             });
         }
 
@@ -704,35 +850,23 @@ function csvEscape(value) {
 function bomCsv(rows) {
     const headers = [
         "Designator",
-        "Quantity",
-        "Manufacturer",
-        "Manufacturer Part Number",
-        "LCSC",
-        "Value",
         "Footprint",
-        "Type",
-        "Description",
-        "Stock",
-        "Unit Cost",
-        "Basic",
-        "Preferred",
+        "Comment",
+        "Manufacturer Part Number",
+        "Manufacturer",
+        "Quantity",
+        "LCSC",
     ];
     const lines = [headers.join(",")];
     for (const row of rows) {
         lines.push([
             row.designators.join(" "),
-            row.quantity,
-            row.manufacturer,
-            row.mpn,
-            row.lcsc,
-            row.value,
             row.footprint,
-            row.type,
-            row.description,
-            row.stock,
-            row.unitCost,
-            row.isBasic,
-            row.isPreferred,
+            row.comment,
+            row.mpn,
+            row.manufacturer,
+            row.quantity,
+            row.lcsc,
         ].map(csvEscape).join(","));
     }
     return `${lines.join("\n")}\n`;
@@ -740,7 +874,9 @@ function bomCsv(rows) {
 
 function writeBomCsv(filePath, rows) {
     const parsed = path.parse(filePath);
-    const outputPath = path.join(parsed.dir, `${parsed.name}.BOM.csv`);
+    const outputDir = path.join(parsed.dir, "KiCad");
+    const outputPath = path.join(outputDir, `${parsed.name}.BOM.csv`);
+    fs.mkdirSync(outputDir, { recursive: true });
     fs.writeFileSync(outputPath, bomCsv(rows));
     return outputPath;
 }
