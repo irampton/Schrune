@@ -3,9 +3,9 @@ const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const { commentFields } = require("./part-comment");
+const { BUILD_DIR_NAME } = require("./project");
 
 const EASYEDA_COMPONENT_API = "https://easyeda.com/api/products";
-const EASYEDA_STEP_MODEL_API = "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y";
 
 function assertLcscPartNumber(partNumber) {
     if (!/^C\d+$/i.test(partNumber)) {
@@ -47,32 +47,6 @@ async function fetchJson(url, fetchImpl = globalThis.fetch) {
     }
 
     return response.json();
-}
-
-async function fetchBuffer(url, fetchImpl = globalThis.fetch) {
-    const response = await fetchImpl(url);
-    if (!response.ok) {
-        throw new Error(`Request failed ${response.status}: ${url}`);
-    }
-
-    return Buffer.from(await response.arrayBuffer());
-}
-
-function isLikelyStepModel(content) {
-    if (!Buffer.isBuffer(content) || content.length === 0) {
-        return false;
-    }
-
-    const header = content.subarray(0, Math.min(content.length, 256)).toString("utf8").trimStart();
-    if (!header) {
-        return false;
-    }
-
-    if (/^(<\?xml|<Error|<!doctype|<html|\{|\[)/i.test(header)) {
-        return false;
-    }
-
-    return header.startsWith("ISO-10303-21") || header.includes("ISO-10303-21");
 }
 
 async function fetchEasyEdaComponent(partNumber, options = {}) {
@@ -375,64 +349,6 @@ function runEasyeda2KicadBridge(partName, component, destinationDir, modelProjec
     throw new Error(formatBridgeFailure(attempts));
 }
 
-function modelDownloadCandidates(component) {
-    const head = component.packageDetail
-        && component.packageDetail.dataStr
-        && component.packageDetail.dataStr.head
-        ? component.packageDetail.dataStr.head
-        : {};
-    const uuid = head.uuid_3d;
-    if (!uuid) {
-        return [];
-    }
-
-    return [
-        `${EASYEDA_STEP_MODEL_API}/${uuid}`,
-        `https://modules.easyeda.com/${uuid}`,
-        `https://modules.easyeda.com/${uuid}.step`,
-        `https://modules.easyeda.com/${uuid}.STEP`,
-        `https://modules.easyeda.com/3dmodel/${uuid}`,
-        `https://modules.easyeda.com/3dmodel/${uuid}.step`,
-        `https://modules.easyeda.com/model/${uuid}`,
-        `https://modules.easyeda.com/model/${uuid}.step`,
-    ];
-}
-
-async function tryDownloadModel(component, destinationDir, partName, options = {}) {
-    const candidates = modelDownloadCandidates(component);
-    const metadata = {
-        uuid: component.packageDetail
-            && component.packageDetail.dataStr
-            && component.packageDetail.dataStr.head
-            && component.packageDetail.dataStr.head.uuid_3d,
-        attemptedUrls: candidates,
-    };
-
-    for (const url of candidates) {
-        try {
-            const content = await fetchBuffer(url, options.fetch);
-            if (!isLikelyStepModel(content)) {
-                throw new Error(`Response was not a STEP model: ${url}`);
-            }
-            const outputPath = path.join(destinationDir, `${partName}.step`);
-            fs.writeFileSync(outputPath, content);
-            return {
-                fileName: `${partName}.step`,
-                downloaded: true,
-                metadata,
-            };
-        } catch (error) {
-            metadata.lastError = error.message;
-        }
-    }
-
-    return {
-        fileName: undefined,
-        downloaded: false,
-        metadata,
-    };
-}
-
 async function addLcscPart(partNumber, options = {}) {
     const component = await fetchEasyEdaComponent(partNumber, options);
     const cPara = component.dataStr && component.dataStr.head && component.dataStr.head.c_para
@@ -446,20 +362,20 @@ async function addLcscPart(partNumber, options = {}) {
 
     fs.mkdirSync(destinationDir, { recursive: true });
 
-    const model = await tryDownloadModel(component, destinationDir, partName, options);
     const projectRoot = path.resolve(options.cwd || process.cwd());
-    const modelProjectDir = path.relative(projectRoot, destinationDir).replace(/\\/g, "/");
+    const kicadProjectRoot = path.join(projectRoot, BUILD_DIR_NAME);
+    const modelProjectDir = path.relative(kicadProjectRoot, destinationDir).replace(/\\/g, "/");
     const pins = inferPinGroups(uniquePinEntries(extractPinsFromEasyEdaSymbol(component.dataStr)));
-    const info = componentInfo(component, {
-        symbol: `./${partName}.kicad_sym`,
-        footprint: `./${partName}.kicad_mod`,
-        model: model.fileName ? `./${model.fileName}` : undefined,
-    }, options.part);
     const schrunePath = path.join(destinationDir, `${partName}.schrune`);
     const bridged = await runEasyeda2KicadBridge(partName, component, destinationDir, modelProjectDir, options);
     if (!bridged) {
         throw new Error("easyeda2kicad bridge did not complete successfully");
     }
+    const info = componentInfo(component, {
+        symbol: `./${partName}.kicad_sym`,
+        footprint: `./${partName}.kicad_mod`,
+        model: bridged.modelFile ? `./${bridged.modelFile}` : undefined,
+    }, options.part);
 
     if (options.updateExistingSchrune) {
         updateExistingSchruneFile(schrunePath, partName, info, pins);
@@ -473,7 +389,7 @@ async function addLcscPart(partNumber, options = {}) {
         schrunePath,
         pins,
         lcsc: partNumber.toUpperCase(),
-        modelDownloaded: model.downloaded,
+        modelDownloaded: Boolean(bridged.modelDownloaded),
     };
 }
 
@@ -481,8 +397,6 @@ module.exports = {
     addLcscPart,
     extractPinsFromEasyEdaSymbol,
     fetchEasyEdaComponent,
-    isLikelyStepModel,
-    modelDownloadCandidates,
     runEasyeda2KicadBridge,
     sanitizeIdentifier,
 };

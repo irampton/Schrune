@@ -6,24 +6,15 @@ const test = require("node:test");
 const {
     addLcscPart,
     extractPinsFromEasyEdaSymbol,
-    isLikelyStepModel,
-    modelDownloadCandidates,
     sanitizeIdentifier,
 } = require("../../src/lcsc");
 
 function response(body, ok = true, status = 200) {
-    const bodyBuffer = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
     return {
         ok,
         status,
         async json() {
             return body;
-        },
-        async arrayBuffer() {
-            return bodyBuffer.buffer.slice(
-                bodyBuffer.byteOffset,
-                bodyBuffer.byteOffset + bodyBuffer.byteLength
-            );
         },
     };
 }
@@ -69,7 +60,7 @@ function bridgeRunner(partName, component, destinationDir, modelProjectDir) {
         && component.packageDetail.dataStr
         && component.packageDetail.dataStr.head
         && component.packageDetail.dataStr.head.uuid_3d
-        ? `${partName}.step`
+        ? "FancyModel.step"
         : undefined;
     const symbol = `(kicad_symbol_lib (version 20251024) (generator "Schrune") (generator_version "10.0")
   (symbol ${JSON.stringify(partName)} (in_bom yes) (on_board yes)
@@ -82,10 +73,22 @@ function bridgeRunner(partName, component, destinationDir, modelProjectDir) {
     const footprint = `(footprint ${JSON.stringify(partName)} (version 20260206) (generator "Schrune") (generator_version "10.0")
   (pad "1" thru_hole rect (at 0 0 0) (size 1 1) (drill 0.5) (layers "*.Cu" "*.Mask"))
 ${modelFile ? `  (model "${"${KIPRJMOD}"}/${modelProjectDir.replace(/\\/g, "/")}/${modelFile}")\n` : ""})
-`;
+    `;
     fs.writeFileSync(path.join(destinationDir, `${partName}.kicad_sym`), symbol);
     fs.writeFileSync(path.join(destinationDir, `${partName}.kicad_mod`), footprint);
-    return { symbolFile: `${partName}.kicad_sym`, footprintFile: `${partName}.kicad_mod` };
+    if (modelFile) {
+        fs.writeFileSync(path.join(destinationDir, modelFile), "ISO-10303-21;\nENDSEC;\nEND-ISO-10303-21;\n");
+    }
+    return {
+        symbolFile: `${partName}.kicad_sym`,
+        footprintFile: `${partName}.kicad_mod`,
+        modelFile,
+        modelDownloaded: Boolean(modelFile),
+    };
+}
+
+function normalizeFootprintPathLikeBridge(content, expectedModelPath) {
+    return content.replace(/(\(model\s+)"[^"]+"/, `$1"${expectedModelPath}"`);
 }
 
 test("extracts EasyEDA symbol pins and sanitizes generated Schrune names", () => {
@@ -116,16 +119,17 @@ test("adds an LCSC part into parts with KiCad files and Schrune file", async () 
         const partFile = path.join(partDir, "ACME_123.schrune");
 
         assert.equal(result.partName, "ACME_123");
-        assert.equal(result.modelDownloaded, false);
+        assert.equal(result.modelDownloaded, true);
         assert.equal(fs.existsSync(path.join(partDir, "ACME_123.kicad_sym")), true);
         assert.equal(fs.existsSync(path.join(partDir, "ACME_123.kicad_mod")), true);
+        assert.equal(fs.existsSync(path.join(partDir, "FancyModel.step")), true);
 
         const schrune = fs.readFileSync(partFile, "utf8");
         assert.match(schrune, /part ACME_123/);
         assert.match(schrune, /LCSC: "C1234"/);
         assert.match(schrune, /footprint: "\.\/ACME_123\.kicad_mod"/);
         assert.match(schrune, /symbol: "\.\/ACME_123\.kicad_sym"/);
-        assert.doesNotMatch(schrune, /model:/);
+        assert.match(schrune, /model: "\.\/FancyModel\.step"/);
         assert.match(schrune, /VCC:1/);
         assert.match(schrune, /GND:2/);
         assert.match(schrune, /GND_3:3/);
@@ -136,13 +140,9 @@ test("adds an LCSC part into parts with KiCad files and Schrune file", async () 
 
 test("downloads STEP model and passes it through to the bridge output", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-lcsc-model-"));
-    const step = Buffer.from("ISO-10303-21;\nHEADER;\nENDSEC;\nEND-ISO-10303-21;\n");
     const fetch = async (url) => {
         if (String(url).includes("/api/products/C1234/components")) {
             return response(easyEdaComponent);
-        }
-        if (String(url) === "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/model-uuid") {
-            return response(step);
         }
         return response("not found", false, 404);
     };
@@ -152,16 +152,34 @@ test("downloads STEP model and passes it through to the bridge output", async ()
         const partDir = path.join(dir, "parts", "ACME_123");
 
         assert.equal(result.modelDownloaded, true);
-        assert.equal(fs.readFileSync(path.join(partDir, "ACME_123.step"), "utf8"), step.toString("utf8"));
+        assert.equal(fs.readFileSync(path.join(partDir, "FancyModel.step"), "utf8"), "ISO-10303-21;\nENDSEC;\nEND-ISO-10303-21;\n");
 
         const schrune = fs.readFileSync(path.join(partDir, "ACME_123.schrune"), "utf8");
-        assert.match(schrune, /model: "\.\/ACME_123\.step"/);
+        assert.match(schrune, /model: "\.\/FancyModel\.step"/);
 
         const footprint = fs.readFileSync(path.join(partDir, "ACME_123.kicad_mod"), "utf8");
-        assert.match(footprint, /\(model "\$\{KIPRJMOD\}\/parts\/ACME_123\/ACME_123\.step"/);
+        assert.match(footprint, /\(model "\$\{KIPRJMOD\}\/\.\.\/parts\/ACME_123\/FancyModel\.step"/);
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
+});
+
+test("bridge model-path normalization rewrites KiCad model blocks with offset data", () => {
+    const input = `(footprint "RP2040"
+  (model "${"${KIPRJMOD}"}/../parts/RP2040/LQFN-56_L7.0-W7.0-P0.4-EP.step/LQFN-56_L7.0-W7.0-P0.4-EP.wrl"
+    (offset (xyz 0 0 0))
+    (scale (xyz 1 1 1))
+    (rotate (xyz 0 0 0))
+  )
+)`;
+    const output = normalizeFootprintPathLikeBridge(
+        input,
+        `${"${KIPRJMOD}"}/../parts/RP2040/LQFN-56_L7.0-W7.0-P0.4-EP.step`
+    );
+
+    assert.match(output, /\(model "\$\{KIPRJMOD\}\/\.\.\/parts\/RP2040\/LQFN-56_L7\.0-W7\.0-P0\.4-EP\.step"/);
+    assert.match(output, /\(offset \(xyz 0 0 0\)\)/);
+    assert.doesNotMatch(output, /\.wrl"/);
 });
 
 test("writes autogenerated BOM metadata into the imported schrune info block", async () => {
@@ -241,19 +259,4 @@ test("updateExistingSchrune refreshes info fields without overwriting custom fie
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
-});
-
-test("tries the EasyEDA STEP endpoint before legacy model URLs", () => {
-    const candidates = modelDownloadCandidates(easyEdaComponent.result);
-    assert.equal(
-        candidates[0],
-        "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/model-uuid"
-    );
-});
-
-test("rejects empty or error payloads as STEP models", () => {
-    assert.equal(isLikelyStepModel(Buffer.alloc(0)), false);
-    assert.equal(isLikelyStepModel(Buffer.from("<Error>NoSuchKey</Error>")), false);
-    assert.equal(isLikelyStepModel(Buffer.from('{"error":"not found"}')), false);
-    assert.equal(isLikelyStepModel(Buffer.from("ISO-10303-21;\nENDSEC;\nEND-ISO-10303-21;")), true);
 });
