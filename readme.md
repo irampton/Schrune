@@ -25,12 +25,12 @@ schrune build example3/example3.schrune
 ```
 
 Build mode compiles a `.schrune` file, resolves parts, and writes KiCad output
-next to the source file:
+into `build/` next to the source file:
 
-- `KiCad/<name>.kicad_pro`
-- `KiCad/<name>.kicad_sch`
-- `KiCad/<name>.kicad_pcb`
-- `<name>.BOM.csv`
+- `build/<name>.kicad_pro`
+- `build/<name>.kicad_sch`
+- `build/<name>.kicad_pcb`
+- `build/<name>.BOM.csv`
 
 Useful flags:
 

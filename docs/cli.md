@@ -23,9 +23,16 @@ the script.
 
 ## Commands
 
-### `schrune build <file.schrune>`
+### `schrune create`
+
+Create a `schrune.json` project file. The CLI prompts for a project name and
+entry `.schrune` file, then writes the manifest next to that entry file.
+
+### `schrune build [file.schrune]`
 
 Compile a Schrune source file, fetch or resolve parts, and generate KiCad output.
+When no file is passed, Schrune resolves the nearest `schrune.json` and uses its
+configured entry file.
 
 Example:
 
@@ -36,8 +43,14 @@ schrune build example3/example3.schrune
 Output:
 
 * An intermediate JavaScript file when `--keep-js` is used
-* A BOM CSV next to the source file
-* A `KiCad/` directory containing the project, schematic, and PCB files
+* A BOM CSV in `build/`
+* A `build/` directory containing the project, schematic, and PCB files
+* Updated `build` paths recorded into `schrune.json` when a project manifest is used
+
+### `schrune open-kicad`
+
+Open the generated KiCad project recorded in `schrune.json` using the platform
+default application launcher.
 
 ### `schrune add <CXXXX>`
 
@@ -51,6 +64,8 @@ schrune add C29823
 ```
 
 This creates a part directory under `parts/` with the Schrune source and KiCad assets for the part.
+When a `schrune.json` project file is present, the imported part is also added
+to its `parts` array as `{ "MPN": "...", "LCSC": "..." }`.
 
 ## Flags
 
@@ -87,12 +102,12 @@ The component fetch stage shows progress in `X/XX` form while parts are being re
 
 The build writes:
 
-* `<name>.BOM.csv`
-* `KiCad/<name>.kicad_pro`
-* `KiCad/<name>.kicad_sch`
-* `KiCad/<name>.kicad_pcb`
+* `build/<name>.BOM.csv`
+* `build/<name>.kicad_pro`
+* `build/<name>.kicad_sch`
+* `build/<name>.kicad_pcb`
 
 ## Notes
 
 * `#include` resolves local Schrune files and `.schrune` files under the source tree.
-* The CLI expects a `.schrune` input file for build mode.
+* The CLI expects either a `.schrune` input file or a nearby `schrune.json` for build mode.

@@ -135,7 +135,7 @@ test("step3 reuses parts-lock entries and writes BOM csv", async () => {
         assert.equal(result.components[0].info.LCSC, "C25804");
         assert.equal(fs.existsSync(result.bomPath), true);
         const bom = fs.readFileSync(result.bomPath, "utf8");
-        assert.equal(result.bomPath, path.join(fixture.dir, "KiCad", "fixture.BOM.csv"));
+        assert.equal(result.bomPath, path.join(fixture.dir, "build", "fixture.BOM.csv"));
         assert.match(bom, /^Designator,Footprint,Comment,Manufacturer Part Number,Manufacturer,Quantity,LCSC/m);
         assert.match(bom, /R1,0603,10k 0.1W,RC0603FR-0710KL,YAGEO,1,C25804/);
     } finally {

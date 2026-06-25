@@ -3,9 +3,20 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const readline = require("readline/promises");
+const { spawn } = require("child_process");
 const { addLcscPart } = require("./lcsc");
 const { assignDesignators, buildDesignatorState, readDesignatorState, step3, writeDesignatorState } = require("./bom");
 const { writeKiCadFiles } = require("./kicad");
+const {
+    PROJECT_FILE,
+    addPartToProjectConfig,
+    findProjectConfig,
+    manifestBuildRecord,
+    relativeManifestPath,
+    resolveBuildTarget,
+    writeProjectConfig,
+} = require("./project");
 
 const ANSI = {
     reset: "\x1b[0m",
@@ -3239,7 +3250,9 @@ function executeStep1JavaScript(filePath) {
 function usage() {
     return [
         "Usage:",
-        "  shrune build [--keep-js] [--no-parts-lock] <file.schrune>",
+        "  shrune create",
+        "  shrune build [--keep-js] [--no-parts-lock] [file.schrune]",
+        "  shrune open-kicad",
         "  shrune add <CXXXX>",
         "",
         "Compatibility:",
@@ -3254,11 +3267,76 @@ class UsageError extends Error {
     }
 }
 
+async function promptForProjectConfig() {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    });
+
+    try {
+        const projectName = (await rl.question("Project name: ")).trim();
+        const entryFile = (await rl.question("Entry file: ")).trim();
+
+        if (!projectName || !entryFile) {
+            throw new Error("Project name and entry file are required");
+        }
+
+        return { projectName, entryFile };
+    } finally {
+        rl.close();
+    }
+}
+
+function openPathWithDefaultApplication(filePath) {
+    const resolvedPath = path.resolve(filePath);
+    let command;
+    let args;
+
+    if (process.platform === "win32") {
+        command = "cmd";
+        args = ["/c", "start", "", resolvedPath];
+    } else if (process.platform === "darwin") {
+        command = "open";
+        args = [resolvedPath];
+    } else {
+        command = "xdg-open";
+        args = [resolvedPath];
+    }
+
+    return new Promise((resolve, reject) => {
+        const child = spawn(command, args, {
+            detached: true,
+            stdio: "ignore",
+        });
+        child.on("error", reject);
+        child.unref();
+        resolve();
+    });
+}
+
 async function main() {
     const args = process.argv.slice(2);
     const command = args[0] && !args[0].startsWith("--") && path.extname(args[0]) !== ".schrune"
         ? args.shift()
         : "build";
+
+    if (command === "create") {
+        const { projectName, entryFile } = await promptForProjectConfig();
+        const entryPath = path.resolve(process.cwd(), entryFile);
+        const projectPath = path.join(path.dirname(entryPath), PROJECT_FILE);
+
+        if (!fs.existsSync(entryPath)) {
+            throw new Error(`Entry file not found: ${entryFile}`);
+        }
+
+        writeProjectConfig(projectPath, {
+            name: projectName,
+            entry: relativeManifestPath(path.dirname(projectPath), entryPath),
+            parts: [],
+        });
+        console.log(colorize(`Created ${projectPath}`, "green", process.stdout));
+        return;
+    }
 
     if (command === "add") {
         const partNumber = args[0];
@@ -3266,12 +3344,35 @@ async function main() {
             throw new UsageError();
         }
 
-        const result = await addLcscPart(partNumber);
+        const project = findProjectConfig(process.cwd());
+        const baseDir = project ? project.dir : process.cwd();
+        const result = await addLcscPart(partNumber, { cwd: baseDir });
+        if (project) {
+            addPartToProjectConfig(project, {
+                MPN: result.partName,
+                LCSC: partNumber.toUpperCase(),
+            });
+        }
         console.log(`Added ${result.partName}`);
         console.log(`Pins: ${result.pins.length}`);
         if (!result.modelDownloaded) {
             console.log("3D STEP model payload was not directly downloadable.");
         }
+        return;
+    }
+
+    if (command === "open-kicad") {
+        const target = resolveBuildTarget({ cwd: process.cwd() });
+        if (!target.project || !target.project.config.build || !target.project.config.build.kicadProject) {
+            throw new Error(`No KiCad project recorded in ${PROJECT_FILE}. Run a build first.`);
+        }
+
+        const projectPath = path.resolve(target.project.dir, target.project.config.build.kicadProject);
+        if (!fs.existsSync(projectPath)) {
+            throw new Error(`KiCad project not found: ${projectPath}`);
+        }
+
+        await openPathWithDefaultApplication(projectPath);
         return;
     }
 
@@ -3282,13 +3383,14 @@ async function main() {
     const keepJs = args.includes("--keep-js");
     const noPartsLock = args.includes("--no-parts-lock");
     const inputFile = args.find((arg) => arg !== "--keep-js" && arg !== "--no-parts-lock");
-    if (!inputFile || path.extname(inputFile) !== ".schrune") {
+    if (inputFile && path.extname(inputFile) !== ".schrune") {
         throw new UsageError();
     }
 
-    const inputPath = path.resolve(process.cwd(), inputFile);
+    const target = resolveBuildTarget({ cwd: process.cwd(), inputFile });
+    const inputPath = target.entryFilePath;
     if (!fs.existsSync(inputPath)) {
-        throw new Error(`File not found: ${inputFile}`);
+        throw new Error(`File not found: ${inputFile || inputPath}`);
     }
 
     const designatorState = readDesignatorState(inputPath);
@@ -3312,6 +3414,7 @@ async function main() {
         progress.start("Fetching components");
         const bom = await step3(inputPath, compiled, {
             noPartsLock,
+            projectName: target.projectName,
             onProgress({ current, total }) {
                 progress.update(`Fetching components (${current}/${total})`);
             },
@@ -3319,10 +3422,17 @@ async function main() {
         progress.succeed("Fetched components");
 
         progress.start("Sending to KiCad");
-        const result = writeKiCadFiles(inputPath, bom);
+        const result = writeKiCadFiles(inputPath, bom, { projectName: target.projectName });
         progress.succeed("Sent to KiCad");
 
         writeDesignatorState(inputPath, buildDesignatorState(result));
+        if (target.project) {
+            const nextConfig = {
+                ...target.project.config,
+                build: manifestBuildRecord(target.project.path, result),
+            };
+            writeProjectConfig(target.project.path, nextConfig);
+        }
 
         console.log(colorize(`Build successful: ${result.components.length} components, ${result.netList.size} nets.`, "green", process.stdout));
     } catch (error) {
@@ -3355,6 +3465,7 @@ module.exports = {
     writeDesignatorState,
     materializeStep1JavaScript,
     createProgress,
+    openPathWithDefaultApplication,
     UsageError,
     main,
 };

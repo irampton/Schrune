@@ -8,10 +8,8 @@
 
 * Test point class
 * Figure out better imports, so 1 script can install missing dependencies
-
   * Shared modules (or even parts!) across files
 * Move BOM to build folder
-* Add an export function
 * Create a project based structure file with entry point, build file locations, etc.
 * Mark as a do not place
 * Better error logging by making a bunch of tests to test bad syntax and adding try/catch blocks
@@ -26,6 +24,8 @@
 * On part add, log out #include statement
 * Error logging back to schrune file lines
 * Module net group and rail pass through
+* Add an export function
+* JLC BOM tool
 
 ## Low
 
@@ -34,10 +34,8 @@
 * Enforce `part` prefix?
 * No insertion on basic functions into top file (--keep-js)
 * Much better schematic layout
-
   * Better symbols for common components (zigzag resistors)
 * VSCode Extension
-
   * Hover over info for parts and modules
   * Colors for nets, parts, and modules
   * More intentional colors

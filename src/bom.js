@@ -3,6 +3,7 @@ const path = require("path");
 const { addLcscPart } = require("./lcsc");
 const { searchJlcParts, selectBestJlcPart } = require("./jlc");
 const { commentFields } = require("./part-comment");
+const { buildPathsForEntry } = require("./project");
 
 const GENERIC_TYPES = new Set(["Resistor", "Capacitor", "Inductor", "Diode"]);
 const LOCK_VERSION = 1;
@@ -45,8 +46,8 @@ function componentIdentity(component) {
     return identity.trim() ? identity : undefined;
 }
 
-function designatorStatePathFor(filePath) {
-    return path.join(path.dirname(filePath), "KiCad", ".schrune-designators.json");
+function designatorStatePathFor(filePath, projectName = path.basename(filePath, ".schrune")) {
+    return buildPathsForEntry(filePath, projectName).designatorStatePath;
 }
 
 function normalizeDesignatorAssignments(assignments = {}) {
@@ -872,10 +873,9 @@ function bomCsv(rows) {
     return `${lines.join("\n")}\n`;
 }
 
-function writeBomCsv(filePath, rows) {
-    const parsed = path.parse(filePath);
-    const outputDir = path.join(parsed.dir, "KiCad");
-    const outputPath = path.join(outputDir, `${parsed.name}.BOM.csv`);
+function writeBomCsv(filePath, rows, projectName = path.basename(filePath, ".schrune")) {
+    const outputPath = buildPathsForEntry(filePath, projectName).bomPath;
+    const outputDir = path.dirname(outputPath);
     fs.mkdirSync(outputDir, { recursive: true });
     fs.writeFileSync(outputPath, bomCsv(rows));
     return outputPath;
@@ -884,7 +884,7 @@ function writeBomCsv(filePath, rows) {
 async function step3(filePath, compiled, options = {}) {
     const resolved = await resolveGenericParts(filePath, compiled, options);
     const bomRows = makeBomRows(resolved);
-    const bomPath = writeBomCsv(filePath, bomRows);
+    const bomPath = writeBomCsv(filePath, bomRows, options.projectName);
     return {
         ...resolved,
         bomRows,

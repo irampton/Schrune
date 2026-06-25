@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { buildPathsForEntry } = require("./project");
 
 const GRID_X = 50.8;
 const GRID_Y = 38.1;
@@ -1000,12 +1001,13 @@ function collectAssets(filePath, compiled) {
     return assets;
 }
 
-function writeKiCadFiles(filePath, compiled) {
-    const projectName = path.basename(filePath, ".schrune");
-    const outputDir = path.join(path.dirname(filePath), "KiCad");
-    const projectPath = path.join(outputDir, `${projectName}.kicad_pro`);
-    const schematicPath = path.join(outputDir, `${projectName}.kicad_sch`);
-    const pcbPath = path.join(outputDir, `${projectName}.kicad_pcb`);
+function writeKiCadFiles(filePath, compiled, options = {}) {
+    const projectName = options.projectName || path.basename(filePath, ".schrune");
+    const outputPaths = buildPathsForEntry(filePath, projectName);
+    const outputDir = outputPaths.buildDir;
+    const projectPath = outputPaths.kicadProjectPath;
+    const schematicPath = outputPaths.schematicPath;
+    const pcbPath = outputPaths.pcbPath;
     const assets = collectAssets(filePath, compiled);
     const schematicPlacements = componentPlacement(compiled);
     const moduleGroups = new Map();

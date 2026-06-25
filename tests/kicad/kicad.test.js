@@ -129,6 +129,7 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.equal(fs.existsSync(result.kicadProjectPath), true);
         assert.equal(fs.existsSync(result.schematicPath), true);
         assert.equal(fs.existsSync(result.pcbPath), true);
+        assert.equal(path.basename(result.kicadDir), "build");
         assert.equal(fs.existsSync(path.join(result.kicadDir, "fp-lib-table")), true);
         assert.equal(fs.existsSync(result.footprintLibraryPath), true);
         assert.equal(fs.existsSync(path.join(result.footprintLibraryPath, "TestPart.kicad_mod")), true);
@@ -237,6 +238,20 @@ module top () {
         assert.equal(fs.existsSync(result.pcbPath), true);
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("uses an explicit project name for generated KiCad filenames", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled, { projectName: "DemoBoard" });
+
+        assert.equal(path.basename(result.kicadProjectPath), "DemoBoard.kicad_pro");
+        assert.equal(path.basename(result.schematicPath), "DemoBoard.kicad_sch");
+        assert.equal(path.basename(result.pcbPath), "DemoBoard.kicad_pcb");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
 });
 

@@ -215,7 +215,7 @@ New designators use the lowest unused number for each prefix.
 
 To keep references stable across rebuilds when the component set changes, the
 compiler also writes a hidden designator cache under
-`KiCad/.schrune-designators.json` and reuses it on the next build when
+`build/.schrune-designators.json` and reuses it on the next build when
 possible.
 
 ## Step 3 - Generate BOM
@@ -301,13 +301,13 @@ does not point directly at an asset, the compiler searches under the source
 file's `parts/` tree using the component type, selected MPN, part number, and
 declared symbol/footprint names. Missing or ambiguous assets are build errors.
 
-The compiler writes all KiCad files into a sibling directory next to the target
+The compiler writes all KiCad files into a sibling `build/` directory next to the target
 `.schrune` file:
 
 ```
-KiCad/{filename}.kicad_pro
-KiCad/{filename}.kicad_sch
-KiCad/{filename}.kicad_pcb
+build/{filename}.kicad_pro
+build/{filename}.kicad_sch
+build/{filename}.kicad_pcb
 ```
 
 If the PCB file already exists, Schrune leaves it untouched and only rewrites
