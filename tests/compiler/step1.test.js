@@ -136,10 +136,10 @@ module top () {
         const result = step1(fixture.filePath);
         const pins = result.components[0].pins;
 
-        assert.equal(pins.VBUS.h[0].net, "power_h");
-        assert.equal(pins.VBUS.h[1].net, "power_h");
-        assert.equal(pins.VBUS.l[0].net, "power_l");
-        assert.equal(pins.VBUS.l[1].net, "power_l");
+        assert.equal(pins.VBUS.h[0].net, "power");
+        assert.equal(pins.VBUS.h[1].net, "power");
+        assert.equal(pins.VBUS.l[0].net, "power.l");
+        assert.equal(pins.VBUS.l[1].net, "power.l");
         assert.equal(pins.Dp[0].net, "usb_p");
         assert.equal(pins.Dp[1].net, "usb_p");
         assert.equal(pins.Dp.net, "usb_p");
@@ -246,7 +246,7 @@ module top () {
         assert.equal(result.nets.VIN.l, "GND");
         assert.equal(result.nets.power_3v3.l, "GND");
         assert.equal(result.nets.power_5v.l, "GND");
-        assert.equal(result.nets.VIN.h, "VIN_h");
+        assert.equal(result.nets.VIN.h, "VIN");
     });
 });
 
@@ -262,7 +262,7 @@ module top () {
 `, (filePath) => {
         const result = step1(filePath);
 
-        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3_h", "power_1v8_h"].sort());
+        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3", "power_1v8"].sort());
         assert.equal(result.nets.gnd, "gnd");
         assert.equal(result.nets.power_3v3.l, "gnd");
         assert.equal(result.nets.power_1v8.l, "gnd");
@@ -607,11 +607,30 @@ module top () {
 `, (filePath) => {
         const result = step1(filePath);
 
-        assert.deepEqual([...result.netList].sort(), ["gpio", "power_h", "power_l"].sort());
+        assert.deepEqual([...result.netList].sort(), ["gpio", "power", "power.l"].sort());
         assert.equal(result.components.length, 1);
         assert.equal(result.components[0].pins.IN.net, "gpio");
-        assert.equal(result.components[0].pins.OUT.net, "power_l");
+        assert.equal(result.components[0].pins.OUT.net, "power.l");
         assert.deepEqual(result.components[0].__schrune.modulePath, ["c"]);
+    });
+});
+
+test("connects net-like endpoints to the high side of a rail by default", () => {
+    withFixture(`#include "TestPart.schrune"
+
+module top () {
+    rail power;
+    net signal;
+    part u = new TestPart();
+    signal ~ power;
+    u.IN ~ power;
+    u.OUT ~ power.l;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        assert.equal(result.nets.signal, "power");
+        assert.equal(result.components[0].pins.IN.net, "power");
+        assert.equal(result.components[0].pins.OUT.net, "power.l");
     });
 });
 

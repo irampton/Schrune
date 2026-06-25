@@ -109,11 +109,31 @@ power.h.name = "VCC";
 power.l.name = "GND";
 ```
 
-Rail sides are accessed with `.h` and `.l`.
+By default, the high side of a rail uses the rail name itself, and the low side
+uses `.l`.
+
+```schrune
+rail power;
+```
+
+This creates default net names:
+
+* `power`
+* `power.l`
+
+Rail sides are still accessed explicitly with `.h` and `.l`.
 
 ```schrune
 power.h ~ part1.VIN;
 power.l ~ part1.GND;
+```
+
+When a net-like endpoint is connected directly to a rail, Schrune connects it to
+the high side by default.
+
+```schrune
+part mcu = new RP2040();
+mcu.VDD ~ power;   // same as mcu.VDD ~ power.h
 ```
 
 ## Parts

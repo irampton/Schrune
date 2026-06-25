@@ -187,10 +187,10 @@ module top () {
         const result = top();
         const pins = result.components[0].pins;
 
-        assert.equal(pins.VBUS.h[0].net, "power_h");
-        assert.equal(pins.VBUS.h[1].net, "power_h");
-        assert.equal(pins.VBUS.l[0].net, "power_l");
-        assert.equal(pins.VBUS.l[1].net, "power_l");
+        assert.equal(pins.VBUS.h[0].net, "power");
+        assert.equal(pins.VBUS.h[1].net, "power");
+        assert.equal(pins.VBUS.l[0].net, "power.l");
+        assert.equal(pins.VBUS.l[1].net, "power.l");
         assert.equal(pins.Dp[0].net, "usb_p");
         assert.equal(pins.Dp[1].net, "usb_p");
     } finally {
@@ -305,7 +305,7 @@ module top () {
         const top = require(generatedPath);
         const result = top();
 
-        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3_h", "power_1v8_h"].sort());
+        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3", "power_1v8"].sort());
         assert.equal(result.nets.gnd, "gnd");
         assert.equal(result.nets.power_3v3.l, "gnd");
         assert.equal(result.nets.power_1v8.l, "gnd");
@@ -340,9 +340,38 @@ module top () {
         const result = top();
 
         assert.equal(result.components[0].value, 5000);
-        assert.deepEqual([...result.netList].sort(), ["power_h", "power_l"]);
-        assert.equal(result.components[0].pins[0].net, "power_h");
-        assert.equal(result.components[0].pins[1].net, "power_l");
+        assert.deepEqual([...result.netList].sort(), ["power", "power.l"]);
+        assert.equal(result.components[0].pins[0].net, "power");
+        assert.equal(result.components[0].pins[1].net, "power.l");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("kept Step 1 JavaScript connects net-like endpoints to rail high by default", () => {
+    const fixture = makeFixture(`#include "TestPart.schrune"
+
+module top () {
+    rail power;
+    net signal;
+    part u = new TestPart();
+    signal ~ power;
+    u.IN ~ power;
+    u.OUT ~ power.l;
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+
+        assert.equal(result.nets.signal, "power");
+        assert.equal(result.components[0].pins.IN.net, "power");
+        assert.equal(result.components[0].pins.OUT.net, "power.l");
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }

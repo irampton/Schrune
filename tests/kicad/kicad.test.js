@@ -389,8 +389,8 @@ module top () {
 
         const childSchematic = fs.readFileSync(result.moduleSchematicPaths.c, "utf8");
         assert.match(childSchematic, /\(symbol \(lib_id "TestPart"\)/);
-        assert.match(childSchematic, /\(global_label "board_power_h"/);
-        assert.match(childSchematic, /\(global_label "board_power_l"/);
+        assert.match(childSchematic, /\(global_label "board_power"/);
+        assert.match(childSchematic, /\(global_label "board_power\.l"/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }

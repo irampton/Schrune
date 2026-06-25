@@ -1402,7 +1402,12 @@ function connectEndpoints(leftExpression, rightExpression, componentsByName, net
     const rightRail = right.type === "net" ? isRailValue(right.value) : isPinRailValue(right.pin);
     if (leftRail || rightRail) {
         if (!leftRail || !rightRail) {
-            throw new Error(`Connection joins rail and net "${leftExpression} ~ ${rightExpression}"`);
+            if (leftRail) {
+                connectEndpoints(`${leftExpression}.h`, rightExpression, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
+            } else {
+                connectEndpoints(leftExpression, `${rightExpression}.h`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
+            }
+            return;
         }
         for (const side of ["h", "l"]) {
             connectEndpoints(`${leftExpression}.${side}`, `${rightExpression}.${side}`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
@@ -2102,8 +2107,8 @@ function collectModuleDeclarations(statements, pathPrefix = "") {
             declarations.push({
                 kind,
                 name,
-                defaultHigh: uniqueNetName(`${pathPrefix}${name}_h`, provisionalNames),
-                defaultLow: uniqueNetName(`${pathPrefix}${name}_l`, provisionalNames),
+                defaultHigh: uniqueNetName(`${pathPrefix}${name}`, provisionalNames),
+                defaultLow: uniqueNetName(`${pathPrefix}${name}.l`, provisionalNames),
             });
         }
     }
@@ -2159,8 +2164,8 @@ function compileModule(moduleTemplate, context, options = {}) {
             type: parameter.type,
             name: parameter.name,
             defaultName: parameter.kind === "net" && !parameter.type ? uniqueNetName(`${pathPrefix}${parameter.name}`, new Set()) : undefined,
-            defaultHigh: parameter.kind === "rail" ? uniqueNetName(`${pathPrefix}${parameter.name}_h`, new Set()) : undefined,
-            defaultLow: parameter.kind === "rail" ? uniqueNetName(`${pathPrefix}${parameter.name}_l`, new Set()) : undefined,
+            defaultHigh: parameter.kind === "rail" ? uniqueNetName(`${pathPrefix}${parameter.name}`, new Set()) : undefined,
+            defaultLow: parameter.kind === "rail" ? uniqueNetName(`${pathPrefix}${parameter.name}.l`, new Set()) : undefined,
         }));
     let localNets;
     try {
@@ -2442,8 +2447,8 @@ function collectTopDeclarations(statements) {
             declarations.push({
                 kind,
                 name,
-                defaultHigh: uniqueNetName(`${name}_h`, provisionalNames),
-                defaultLow: uniqueNetName(`${name}_l`, provisionalNames),
+                defaultHigh: uniqueNetName(name, provisionalNames),
+                defaultLow: uniqueNetName(`${name}.l`, provisionalNames),
             });
         }
     }
@@ -3025,10 +3030,15 @@ function renderRuntimeHelpers() {
         `        const rightRail = right.type === "net" ? (!right.ref.__netRef && !right.ref.__netGroup && right.ref.h && right.ref.l) : Boolean(right.pin && right.pin.__pinRail);\n` +
         `        if (leftRail || rightRail) {\n` +
         `            if (!leftRail || !rightRail) {\n` +
-        `                throw new Error("Connection joins rail and net");\n` +
+        `                if (leftRail) {\n` +
+        `                    __connect(left.type === "net" ? __net(left.ref.h) : { ...left, pin: left.pin.h, key: left.defaultNetName, defaultNetName: left.defaultNetName }, right);\n` +
+        `                } else {\n` +
+        `                    __connect(left, right.type === "net" ? __net(right.ref.h) : { ...right, pin: right.pin.h, key: right.defaultNetName, defaultNetName: right.defaultNetName });\n` +
+        `                }\n` +
+        `                return;\n` +
         `            }\n` +
-        `            __connect(left.type === "net" ? __net(left.ref.h) : { ...left, pin: left.pin.h, key: left.defaultNetName + "_h", defaultNetName: left.defaultNetName + "_h" }, right.type === "net" ? __net(right.ref.h) : { ...right, pin: right.pin.h, key: right.defaultNetName + "_h", defaultNetName: right.defaultNetName + "_h" });\n` +
-        `            __connect(left.type === "net" ? __net(left.ref.l) : { ...left, pin: left.pin.l, key: left.defaultNetName + "_l", defaultNetName: left.defaultNetName + "_l" }, right.type === "net" ? __net(right.ref.l) : { ...right, pin: right.pin.l, key: right.defaultNetName + "_l", defaultNetName: right.defaultNetName + "_l" });\n` +
+        `            __connect(left.type === "net" ? __net(left.ref.h) : { ...left, pin: left.pin.h, key: left.defaultNetName, defaultNetName: left.defaultNetName }, right.type === "net" ? __net(right.ref.h) : { ...right, pin: right.pin.h, key: right.defaultNetName, defaultNetName: right.defaultNetName });\n` +
+        `            __connect(left.type === "net" ? __net(left.ref.l) : { ...left, pin: left.pin.l, key: left.defaultNetName + ".l", defaultNetName: left.defaultNetName + ".l" }, right.type === "net" ? __net(right.ref.l) : { ...right, pin: right.pin.l, key: right.defaultNetName + ".l", defaultNetName: right.defaultNetName + ".l" });\n` +
         `            return;\n` +
         `        }\n` +
         `        const leftNetGroup = left.type === "net" ? Boolean(left.ref.__netGroup) : Boolean(left.pin && left.pin.__pinNetGroup);\n` +
