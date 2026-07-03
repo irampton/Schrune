@@ -3,13 +3,13 @@ const path = require("path");
 const crypto = require("crypto");
 const { buildPathsForEntry } = require("./project");
 
-const GRID_X = 50.8;
-const GRID_Y = 38.1;
-const START_X = 35.56;
-const START_Y = 35.56;
+const GRID_X = 203.2;
+const GRID_Y = 76.2;
+const START_X = 76.2;
+const START_Y = 101.6;
 const PIN_LABEL_STUB_LENGTH = 7.62;
-const GROUPED_COMPONENT_SPACING_X = 50.8;
-const GROUPED_COMPONENT_SPACING_Y = 15.24;
+const GROUPED_COMPONENT_SPACING_X = 76.2;
+const GROUPED_COMPONENT_SPACING_Y = 25.4;
 const KICAD_GENERATOR_VERSION = "10.0";
 const KICAD_SCH_VERSION = 20260306;
 const KICAD_PCB_VERSION = 20260206;
@@ -367,9 +367,19 @@ function componentPlacement(compiled) {
 
 function renderLibSymbols(symbols) {
     const rendered = [...symbols.values()].map((symbol) => {
-        return hideLibrarySymbolDisplayProperties(symbol.source).split("\n").map((line) => `    ${line}`).join("\n");
+        return normalizeLibraryPinTypes(hideLibrarySymbolDisplayProperties(symbol.source))
+            .split("\n")
+            .map((line) => `    ${line}`)
+            .join("\n");
     });
     return `  (lib_symbols\n${rendered.join("\n")}\n  )`;
+}
+
+function normalizeLibraryPinTypes(source) {
+    return source.replace(
+        /\(pin\s+(input|output|bidirectional|tri_state|passive|free|unspecified|power_in|power_out|open_collector|open_emitter)\s+/g,
+        "(pin passive "
+    );
 }
 
 function propertyKey(propertySource) {
@@ -447,6 +457,37 @@ function pinEnd(placement, pin) {
         x: placement.x + pin.x,
         y: placement.y - pin.y,
         angle,
+    };
+}
+
+function outwardPinAngle(placement, point) {
+    const step = 1;
+    const candidate = { ...point, stubLength: step };
+    const end = labelTextPoint(point, candidate);
+    const currentDistance = ((point.x - placement.x) ** 2) + ((point.y - placement.y) ** 2);
+    const nextDistance = ((end.x - placement.x) ** 2) + ((end.y - placement.y) ** 2);
+
+    if (nextDistance + 0.001 >= currentDistance) {
+        return point.angle;
+    }
+
+    if (point.angle === 0) {
+        return 180;
+    }
+    if (point.angle === 180) {
+        return 0;
+    }
+    if (point.angle === 90) {
+        return 270;
+    }
+    return 90;
+}
+
+function labelConnectionPoint(placement, pin) {
+    const point = pinEnd(placement, pin);
+    return {
+        ...point,
+        angle: outwardPinAngle(placement, point),
     };
 }
 
@@ -543,6 +584,15 @@ function renderNetConnection(projectName, component, netName, point, pin, option
     ].join("\n");
 }
 
+function renderNoConnect(projectName, component, point, pin) {
+    const seed = `${projectName}:${component.designator}:${pin.number}:no-connect:${point.x}:${point.y}`;
+    return [
+        `  (no_connect (at ${point.x.toFixed(2)} ${point.y.toFixed(2)})`,
+        `    (uuid ${kicadId(seed)})`,
+        `  )`,
+    ].join("\n");
+}
+
 function renderSheetEntry(projectName, sheetName, sheetFile, x, y) {
     return [
         `  (sheet (at ${x.toFixed(2)} ${y.toFixed(2)}) (size 30.48 15.24)`,
@@ -576,7 +626,7 @@ function renderSchematic(filePath, compiled, assets, placements, options = {}) {
         const fanoutLengths = new Map();
         const groupedPins = new Map();
         for (const [padNumber, symbolPin] of symbolPins.entries()) {
-            const point = pinEnd(placement, symbolPin);
+            const point = labelConnectionPoint(placement, symbolPin);
             const side = String(point.angle);
             if (!groupedPins.has(side)) {
                 groupedPins.set(side, []);
@@ -599,15 +649,19 @@ function renderSchematic(filePath, compiled, assets, placements, options = {}) {
         }
 
         for (const [index, pin] of flattenPins(component.pins).entries()) {
-            if (!pin.net) {
-                continue;
-            }
             const padNumber = physicalPadNumber(component, pin, index);
             const symbolPin = symbolPins.get(padNumber);
             if (!symbolPin) {
                 continue;
             }
-            const point = pinEnd(placement, symbolPin);
+            const point = labelConnectionPoint(placement, symbolPin);
+            if (!pin.net) {
+                connections.push(renderNoConnect(projectName, component, point, {
+                    ...point,
+                    number: padNumber,
+                }));
+                continue;
+            }
             connections.push(renderNetConnection(projectName, component, pin.net, point, {
                 ...point,
                 length: symbolPin.length,
@@ -620,7 +674,7 @@ function renderSchematic(filePath, compiled, assets, placements, options = {}) {
     return [
         `(kicad_sch (version ${KICAD_SCH_VERSION}) (generator "Schrune") (generator_version "${KICAD_GENERATOR_VERSION}")`,
         `  (uuid ${kicadId(`${projectName}:sheet`)})`,
-        `  (paper "A4")`,
+        `  (paper "A1")`,
         renderLibSymbols(symbols),
         ...instances,
         ...connections,
@@ -1052,7 +1106,6 @@ function writeKiCadFiles(filePath, compiled, options = {}) {
     const schematicPath = outputPaths.schematicPath;
     const pcbPath = outputPaths.pcbPath;
     const assets = collectAssets(filePath, compiled);
-    const schematicPlacements = componentPlacement(compiled);
     const moduleGroups = new Map();
     for (const component of compiled.components) {
         const moduleName = component.__schrune && component.__schrune.moduleName;
@@ -1083,7 +1136,7 @@ function writeKiCadFiles(filePath, compiled, options = {}) {
         filePath,
         { ...compiled, components: rootComponents },
         assets,
-        schematicPlacements,
+        componentPlacement({ ...compiled, components: rootComponents }),
         {
             globalLabels: hasModuleSheets,
             projectName,
@@ -1098,7 +1151,7 @@ function writeKiCadFiles(filePath, compiled, options = {}) {
             filePath,
             { ...compiled, components: moduleComponents },
             assets,
-            schematicPlacements,
+            componentPlacement({ ...compiled, components: moduleComponents }),
             { globalLabels: true, projectName }
         ));
         moduleSchematicPaths[entry.name] = modulePath;

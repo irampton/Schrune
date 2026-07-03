@@ -7,8 +7,6 @@
 * Figure out better imports:
   * Shared modules with their own parts
   * Common parts folder?
-* Much better schematic layout
-  * Better symbols for common components (zigzag resistors)
 
 ## Medium
 
@@ -27,6 +25,7 @@
 * Add a "bridging" designator to parts with many pins
 * No insertion on basic functions into top file (--keep-js)
 * Some way to back-port (or set) the designators to the .schrune files
+* Better symbols for common components (zigzag resistors)
 
 ## Maybe
 

@@ -233,10 +233,10 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.match(schematic, /\(sheet_instances/);
         assert.match(schematic, /\(label "signal"/);
         assert.match(schematic, /\(label "GND"/);
-        assert.match(schematic, /\(wire \(pts \(xy 27\.94 34\.29\) \(xy 20\.32 34\.29\)\)/);
-        assert.match(schematic, /\(label "signal" \(at 20\.32 34\.29 180\)/);
-        assert.match(schematic, /\(wire \(pts \(xy 43\.18 36\.83\) \(xy 50\.80 36\.83\)\)/);
-        assert.match(schematic, /\(label "GND" \(at 50\.80 36\.83 0\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 68\.58 100\.33\) \(xy 60\.96 100\.33\)\)/);
+        assert.match(schematic, /\(label "signal" \(at 60\.96 100\.33 180\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 83\.82 102\.87\) \(xy 91\.44 102\.87\)\)/);
+        assert.match(schematic, /\(label "GND" \(at 91\.44 102\.87 0\)/);
         assert.doesNotMatch(schematic, /power:/);
 
         const pcb = fs.readFileSync(result.pcbPath, "utf8");
@@ -307,10 +307,10 @@ module top () {
         const result = writeKiCadFiles(fixture.filePath, compiled);
         const schematic = fs.readFileSync(result.schematicPath, "utf8");
 
-        assert.match(schematic, /\(wire \(pts \(xy 34\.29 40\.64\) \(xy 34\.29 48\.26\)\)/);
-        assert.match(schematic, /\(label "left" \(at 34\.29 48\.26 90\)/);
-        assert.match(schematic, /\(wire \(pts \(xy 36\.83 40\.64\) \(xy 36\.83 50\.80\)\)/);
-        assert.match(schematic, /\(label "right" \(at 36\.83 50\.80 90\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 74\.93 106\.68\) \(xy 74\.93 114\.30\)\)/);
+        assert.match(schematic, /\(label "left" \(at 74\.93 114\.30 90\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 77\.47 106\.68\) \(xy 77\.47 116\.84\)\)/);
+        assert.match(schematic, /\(label "right" \(at 77\.47 116\.84 90\)/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
@@ -373,10 +373,10 @@ module top () {
 
         assert.ok(instanceBlock);
         assert.match(instanceBlock[0], /\(pin "2"[\s\S]*?\(pin "1"/);
-        assert.match(schematic, /\(wire \(pts \(xy 27\.94 35\.56\) \(xy 20\.32 35\.56\)\)/);
-        assert.match(schematic, /\(label "right" \(at 20\.32 35\.56 180\)/);
-        assert.match(schematic, /\(wire \(pts \(xy 43\.18 35\.56\) \(xy 50\.80 35\.56\)\)/);
-        assert.match(schematic, /\(label "left" \(at 50\.80 35\.56 0\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 68\.58 101\.60\) \(xy 60\.96 101\.60\)\)/);
+        assert.match(schematic, /\(label "right" \(at 60\.96 101\.60 180\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 83\.82 101\.60\) \(xy 91\.44 101\.60\)\)/);
+        assert.match(schematic, /\(label "left" \(at 91\.44 101\.60 0\)/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
@@ -530,10 +530,10 @@ module top () {
         const result = writeKiCadFiles(fixture.filePath, compiled);
         const schematic = fs.readFileSync(result.schematicPath, "utf8");
 
-        assert.match(schematic, /\(symbol \(lib_id "TestPart"\) \(at 35\.56 35\.56 0\)/);
-        assert.match(schematic, /\(symbol \(lib_id "TestPart"\) \(at 86\.36 35\.56 0\)/);
-        assert.match(schematic, /\(wire \(pts \(xy 43\.18 36\.83\) \(xy 50\.80 36\.83\)\)/);
-        assert.match(schematic, /\(wire \(pts \(xy 78\.74 34\.29\) \(xy 71\.12 34\.29\)\)/);
+        assert.match(schematic, /\(symbol \(lib_id "TestPart"\) \(at 76\.20 101\.60 0\)/);
+        assert.match(schematic, /\(symbol \(lib_id "TestPart"\) \(at 152\.40 101\.60 0\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 83\.82 102\.87\) \(xy 91\.44 102\.87\)\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 144\.78 100\.33\) \(xy 137\.16 100\.33\)\)/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
