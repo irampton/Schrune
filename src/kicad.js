@@ -7,7 +7,7 @@ const GRID_X = 50.8;
 const GRID_Y = 38.1;
 const START_X = 35.56;
 const START_Y = 35.56;
-const PIN_LABEL_LENGTH = 5.08;
+const PIN_LABEL_STUB_LENGTH = 7.62;
 const KICAD_GENERATOR_VERSION = "10.0";
 const KICAD_SCH_VERSION = 20260306;
 const KICAD_PCB_VERSION = 20260206;
@@ -446,28 +446,38 @@ function pinEnd(placement, pin) {
     };
 }
 
-function labelEnd(point, pin) {
+function labelTextPoint(point, pin) {
     if (pin.angle === 0) {
-        return { x: point.x - PIN_LABEL_LENGTH, y: point.y };
+        return { x: point.x - PIN_LABEL_STUB_LENGTH, y: point.y };
     }
     if (pin.angle === 180) {
-        return { x: point.x + PIN_LABEL_LENGTH, y: point.y };
+        return { x: point.x + PIN_LABEL_STUB_LENGTH, y: point.y };
     }
     if (pin.angle === 90) {
-        return { x: point.x, y: point.y + PIN_LABEL_LENGTH };
+        return { x: point.x, y: point.y - PIN_LABEL_STUB_LENGTH };
     }
-    return { x: point.x, y: point.y - PIN_LABEL_LENGTH };
+    return {
+        x: point.x,
+        y: point.y + PIN_LABEL_STUB_LENGTH,
+    };
+}
+
+function labelEnd(point, pin) {
+    return labelTextPoint(point, pin);
 }
 
 function labelAngle(pin) {
+    if (pin.angle === 90 || pin.angle === 270) {
+        return 90;
+    }
     return pin.angle === 0 ? 180 : 0;
 }
 
-function labelPoint(start, end) {
-    return {
-        x: (start.x + end.x) / 2,
-        y: (start.y + end.y) / 2,
-    };
+function labelJustify(pin) {
+    if (pin.angle === 0 || pin.angle === 90) {
+        return "right";
+    }
+    return "left";
 }
 
 function renderSchematicProperty(_projectName, _component, name, value, x, y, options = {}) {
@@ -515,17 +525,17 @@ function renderSchematicSymbol(component, symbol, placement, projectName) {
 
 function renderNetConnection(projectName, component, netName, point, pin, options = {}) {
     const end = labelEnd(point, pin);
-    const label = labelPoint(point, end);
     const seed = `${projectName}:${component.designator}:${pin.number}:${netName}:${point.x}:${point.y}:${end.x}:${end.y}`;
     const labelToken = options.globalLabels ? "global_label" : "label";
     const labelShape = labelToken === "global_label" ? " (shape input)" : "";
+    const justify = options.globalLabels ? ` (justify ${labelJustify(pin)})` : "";
     return [
         `  (wire (pts (xy ${point.x.toFixed(2)} ${point.y.toFixed(2)}) (xy ${end.x.toFixed(2)} ${end.y.toFixed(2)}))`,
         `    (stroke (width 0) (type default))`,
         `    (uuid ${kicadId(`${seed}:wire`)})`,
         `  )`,
-        `  (${labelToken} ${kicadString(netName)}${labelShape} (at ${label.x.toFixed(2)} ${label.y.toFixed(2)} ${labelAngle(pin)})`,
-        `    (effects (font (size 1.27 1.27)))`,
+        `  (${labelToken} ${kicadString(netName)}${labelShape} (at ${end.x.toFixed(2)} ${end.y.toFixed(2)} ${labelAngle(pin)})`,
+        `    (effects (font (size 1.27 1.27))${justify})`,
         `    (uuid ${kicadId(`${seed}:label`)})`,
         `  )`,
     ].join("\n");

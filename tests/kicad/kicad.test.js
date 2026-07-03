@@ -96,6 +96,51 @@ const footprintFile = `(footprint "TestPart" (version 20221018) (generator Schru
 )
 `;
 
+const verticalPinSymbolFile = `(kicad_symbol_lib (version 20211014) (generator Schrune)
+  (symbol "VerticalPart" (pin_names (offset 1.016)) (in_bom yes) (on_board yes)
+    (property "Reference" "J?" (at 0 5.08 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "VerticalPart" (at 0 -5.08 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "./VerticalPart.kicad_mod" (at 0 -7.62 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "Datasheet" "" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (symbol "VerticalPart_0_1"
+      (rectangle (start -3.81 5.08) (end 3.81 0)
+        (stroke (width 0.254) (type default))
+        (fill (type background))
+      )
+      (pin passive line (at -1.27 -5.08 90) (length 5.08)
+        (name "1" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line (at 1.27 -5.08 90) (length 5.08)
+        (name "2" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+)
+`;
+
+const verticalPinFootprintFile = `(footprint "VerticalPart" (version 20221018) (generator Schrune)
+  (attr through_hole)
+  (fp_text reference "REF**" (at 0 -2 0) (layer "F.SilkS")
+    (effects (font (size 1 1) (thickness 0.15)))
+  )
+  (fp_text value "VerticalPart" (at 0 2 0) (layer "F.Fab")
+    (effects (font (size 1 1) (thickness 0.15)))
+  )
+  (pad "1" thru_hole circle (at -2.5 0 0) (size 1 1) (drill 0.5) (layers "*.Cu" "*.Mask"))
+  (pad "2" thru_hole circle (at 2.5 0 0) (size 1 1) (drill 0.5) (layers "*.Cu" "*.Mask"))
+)
+`;
+
 function makeFixture(options = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-kicad-"));
     const partsDir = path.join(dir, "parts", "TestPart");
@@ -160,6 +205,10 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.match(schematic, /\(sheet_instances/);
         assert.match(schematic, /\(label "signal"/);
         assert.match(schematic, /\(label "GND"/);
+        assert.match(schematic, /\(wire \(pts \(xy 27\.94 36\.83\) \(xy 20\.32 36\.83\)\)/);
+        assert.match(schematic, /\(label "signal" \(at 20\.32 36\.83 180\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 43\.18 34\.29\) \(xy 50\.80 34\.29\)\)/);
+        assert.match(schematic, /\(label "GND" \(at 50\.80 34\.29 0\)/);
         assert.doesNotMatch(schematic, /power:/);
 
         const pcb = fs.readFileSync(result.pcbPath, "utf8");
@@ -171,6 +220,69 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.match(pcb, /\(net \d+ "signal"\)/);
         assert.doesNotMatch(pcb, /\(at [^)]*\(net /);
         assert.doesNotMatch(pcb, /\(fill \(type none\)\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("connects imported vertical pins at their electrical endpoints and rotates labels", () => {
+    const fixture = makeFixture({
+        partFile: `part VerticalPart {
+    info: {
+        partNumber: "VerticalPart",
+        manufacture: "TestCo",
+        footprint: "./VerticalPart.kicad_mod",
+        symbol: "./VerticalPart.kicad_sym",
+        designatorPrefix: "J",
+    }
+
+    pins: [
+        1:1,
+        2:2,
+    ]
+}
+`,
+        source: `#include "VerticalPart.schrune"
+
+module top () {
+    net left;
+    net right;
+    part j = new VerticalPart();
+    j[1] ~ left;
+    j[2] ~ right;
+}
+`,
+    });
+
+    try {
+        const partsDir = path.join(fixture.dir, "parts", "VerticalPart");
+        fs.mkdirSync(partsDir, { recursive: true });
+        fs.writeFileSync(path.join(partsDir, "VerticalPart.schrune"), `part VerticalPart {
+    info: {
+        partNumber: "VerticalPart",
+        manufacture: "TestCo",
+        footprint: "./VerticalPart.kicad_mod",
+        symbol: "./VerticalPart.kicad_sym",
+        designatorPrefix: "J",
+    }
+
+    pins: [
+        1:1,
+        2:2,
+    ]
+}
+`);
+        fs.writeFileSync(path.join(partsDir, "VerticalPart.kicad_sym"), verticalPinSymbolFile);
+        fs.writeFileSync(path.join(partsDir, "VerticalPart.kicad_mod"), verticalPinFootprintFile);
+
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled);
+        const schematic = fs.readFileSync(result.schematicPath, "utf8");
+
+        assert.match(schematic, /\(wire \(pts \(xy 34\.29 30\.48\) \(xy 34\.29 22\.86\)\)/);
+        assert.match(schematic, /\(label "left" \(at 34\.29 22\.86 90\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 36\.83 30\.48\) \(xy 36\.83 22\.86\)\)/);
+        assert.match(schematic, /\(label "right" \(at 36\.83 22\.86 90\)/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
@@ -391,6 +503,8 @@ module top () {
         assert.match(childSchematic, /\(symbol \(lib_id "TestPart"\)/);
         assert.match(childSchematic, /\(global_label "board_power"/);
         assert.match(childSchematic, /\(global_label "board_power\.l"/);
+        assert.match(childSchematic, /\(global_label "board_power"[\s\S]*?\(effects \(font \(size 1\.27 1\.27\)\) \(justify right\)\)/);
+        assert.match(childSchematic, /\(global_label "board_power\.l"[\s\S]*?\(effects \(font \(size 1\.27 1\.27\)\) \(justify left\)\)/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
