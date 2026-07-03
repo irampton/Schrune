@@ -8,6 +8,8 @@ const GRID_Y = 38.1;
 const START_X = 35.56;
 const START_Y = 35.56;
 const PIN_LABEL_STUB_LENGTH = 7.62;
+const GROUPED_COMPONENT_SPACING_X = 50.8;
+const GROUPED_COMPONENT_SPACING_Y = 15.24;
 const KICAD_GENERATOR_VERSION = "10.0";
 const KICAD_SCH_VERSION = 20260306;
 const KICAD_PCB_VERSION = 20260206;
@@ -353,8 +355,8 @@ function componentPlacement(compiled) {
         const y = START_Y + row * GRID_Y;
         groups.get(key).forEach((component, offset) => {
             placements.set(component, {
-                x: x + (offset % 3) * 15.24,
-                y: y + Math.floor(offset / 3) * 15.24,
+                x: x + (offset % 3) * GROUPED_COMPONENT_SPACING_X,
+                y: y + Math.floor(offset / 3) * GROUPED_COMPONENT_SPACING_Y,
                 rotation: 0,
             });
         });
@@ -440,25 +442,28 @@ function hideLibrarySymbolDisplayProperties(source) {
 }
 
 function pinEnd(placement, pin) {
+    const angle = pin.angle === 90 ? 270 : pin.angle === 270 ? 90 : pin.angle;
     return {
         x: placement.x + pin.x,
-        y: placement.y + pin.y,
+        y: placement.y - pin.y,
+        angle,
     };
 }
 
 function labelTextPoint(point, pin) {
+    const stubLength = pin.stubLength || PIN_LABEL_STUB_LENGTH;
     if (pin.angle === 0) {
-        return { x: point.x - PIN_LABEL_STUB_LENGTH, y: point.y };
+        return { x: point.x - stubLength, y: point.y };
     }
     if (pin.angle === 180) {
-        return { x: point.x + PIN_LABEL_STUB_LENGTH, y: point.y };
+        return { x: point.x + stubLength, y: point.y };
     }
     if (pin.angle === 90) {
-        return { x: point.x, y: point.y - PIN_LABEL_STUB_LENGTH };
+        return { x: point.x, y: point.y - stubLength };
     }
     return {
         x: point.x,
-        y: point.y + PIN_LABEL_STUB_LENGTH,
+        y: point.y + stubLength,
     };
 }
 
@@ -491,14 +496,12 @@ function renderSchematicProperty(_projectName, _component, name, value, x, y, op
 
 function renderSchematicSymbol(component, symbol, placement, projectName) {
     const pinLines = [...symbol.pins.keys()]
-        .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
         .map((pinNumber) => {
             const pin = symbol.pins.get(pinNumber);
             const geometry = `${pin.x}:${pin.y}:${pin.angle}:${pin.length}`;
             return `    (pin ${kicadString(pinNumber)} (uuid ${kicadId(`${projectName}:sch:${component.designator}:pin:${pinNumber}:${geometry}`)}))`;
         });
     const symbolGeometry = [...symbol.pins.entries()]
-        .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
         .map(([pinNumber, pin]) => `${pinNumber}:${pin.x}:${pin.y}:${pin.angle}:${pin.length}`)
         .join("|");
     const symbolInstanceSeed = `${projectName}:sch:${component.designator}:${symbol.name}:${placement.x}:${placement.y}:${placement.rotation}:${symbolGeometry}`;
@@ -528,14 +531,13 @@ function renderNetConnection(projectName, component, netName, point, pin, option
     const seed = `${projectName}:${component.designator}:${pin.number}:${netName}:${point.x}:${point.y}:${end.x}:${end.y}`;
     const labelToken = options.globalLabels ? "global_label" : "label";
     const labelShape = labelToken === "global_label" ? " (shape input)" : "";
-    const justify = options.globalLabels ? ` (justify ${labelJustify(pin)})` : "";
     return [
         `  (wire (pts (xy ${point.x.toFixed(2)} ${point.y.toFixed(2)}) (xy ${end.x.toFixed(2)} ${end.y.toFixed(2)}))`,
         `    (stroke (width 0) (type default))`,
         `    (uuid ${kicadId(`${seed}:wire`)})`,
         `  )`,
         `  (${labelToken} ${kicadString(netName)}${labelShape} (at ${end.x.toFixed(2)} ${end.y.toFixed(2)} ${labelAngle(pin)})`,
-        `    (effects (font (size 1.27 1.27))${justify})`,
+        `    (effects (font (size 1.27 1.27)))`,
         `    (uuid ${kicadId(`${seed}:label`)})`,
         `  )`,
     ].join("\n");
@@ -558,7 +560,7 @@ function renderSheetEntry(projectName, sheetName, sheetFile, x, y) {
 }
 
 function renderSchematic(filePath, compiled, assets, placements, options = {}) {
-    const projectName = path.basename(filePath, ".schrune");
+    const projectName = options.projectName || path.basename(filePath, ".schrune");
     const symbols = new Map();
     const instances = [];
     const connections = [];
@@ -571,6 +573,31 @@ function renderSchematic(filePath, compiled, assets, placements, options = {}) {
         instances.push(renderSchematicSymbol(component, asset, placement, projectName));
 
         const symbolPins = asset.pins;
+        const fanoutLengths = new Map();
+        const groupedPins = new Map();
+        for (const [padNumber, symbolPin] of symbolPins.entries()) {
+            const point = pinEnd(placement, symbolPin);
+            const side = String(point.angle);
+            if (!groupedPins.has(side)) {
+                groupedPins.set(side, []);
+            }
+            groupedPins.get(side).push({
+                padNumber,
+                point,
+            });
+        }
+        for (const [side, sidePins] of groupedPins.entries()) {
+            sidePins.sort((left, right) => {
+                if (side === "0" || side === "180") {
+                    return left.point.y - right.point.y;
+                }
+                return left.point.x - right.point.x;
+            });
+            sidePins.forEach((entry, index) => {
+                fanoutLengths.set(entry.padNumber, PIN_LABEL_STUB_LENGTH + (index * 2.54));
+            });
+        }
+
         for (const [index, pin] of flattenPins(component.pins).entries()) {
             if (!pin.net) {
                 continue;
@@ -582,8 +609,10 @@ function renderSchematic(filePath, compiled, assets, placements, options = {}) {
             }
             const point = pinEnd(placement, symbolPin);
             connections.push(renderNetConnection(projectName, component, pin.net, point, {
-                ...symbolPin,
+                ...point,
+                length: symbolPin.length,
                 number: padNumber,
+                stubLength: fanoutLengths.get(padNumber),
             }, options));
         }
     }
@@ -746,8 +775,8 @@ function addPadNets(source, pinNetByPad, netNumbers) {
     return output + source.slice(cursor);
 }
 
-function renderPcb(filePath, compiled, assets, placements) {
-    const projectName = path.basename(filePath, ".schrune");
+function renderPcb(filePath, compiled, assets, placements, options = {}) {
+    const projectName = options.projectName || path.basename(filePath, ".schrune");
     const netNames = netNamesFor(compiled);
     const netNumbers = new Map(netNames.map((netName, index) => [netName, index + 1]));
     const footprints = compiled.components.map((component) => {
@@ -1057,6 +1086,7 @@ function writeKiCadFiles(filePath, compiled, options = {}) {
         schematicPlacements,
         {
             globalLabels: hasModuleSheets,
+            projectName,
             sheetEntries: sheetEntries.map((entry) => renderSheetEntry(projectName, entry.name, entry.file, entry.x, entry.y)),
         }
     ));
@@ -1069,12 +1099,12 @@ function writeKiCadFiles(filePath, compiled, options = {}) {
             { ...compiled, components: moduleComponents },
             assets,
             schematicPlacements,
-            { globalLabels: true }
+            { globalLabels: true, projectName }
         ));
         moduleSchematicPaths[entry.name] = modulePath;
     }
 
-    const nextPcb = renderPcb(filePath, compiled, assets, componentPlacement(compiled));
+    const nextPcb = renderPcb(filePath, compiled, assets, componentPlacement(compiled), { projectName });
     const pcbSource = fs.existsSync(pcbPath)
         ? refreshExistingPcb(fs.readFileSync(pcbPath, "utf8"), nextPcb)
         : nextPcb;
