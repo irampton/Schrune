@@ -1020,8 +1020,8 @@ function refreshExistingPcb(existingPcb, nextPcb) {
         : insertBeforeRootClose(refreshed, nextFootprintBlock);
 }
 
-function renderProject(projectName) {
-    return `${JSON.stringify({
+function projectObject(projectName) {
+    return {
         board: {
             design_settings: {
                 defaults: {},
@@ -1057,6 +1057,37 @@ function renderProject(projectName) {
             }],
             used_designators: "",
             variants: [],
+        },
+    };
+}
+
+function renderProject(projectName) {
+    return `${JSON.stringify(projectObject(projectName), null, 2)}\n`;
+}
+
+function refreshExistingProject(existingProjectSource, projectName) {
+    let existingProject;
+    try {
+        existingProject = JSON.parse(existingProjectSource);
+    } catch {
+        return renderProject(projectName);
+    }
+
+    const nextProject = projectObject(projectName);
+    return `${JSON.stringify({
+        ...existingProject,
+        meta: {
+            ...existingProject.meta,
+            ...nextProject.meta,
+        },
+        boards: nextProject.boards,
+        schematic: {
+            ...existingProject.schematic,
+            meta: {
+                ...(existingProject.schematic || {}).meta,
+                ...nextProject.schematic.meta,
+            },
+            top_level_sheets: nextProject.schematic.top_level_sheets,
         },
     }, null, 2)}\n`;
 }
@@ -1112,7 +1143,10 @@ function writeKiCadFiles(filePath, compiled, options = {}) {
     const footprintLibraryPath = writeFootprintLibrary(outputDir, assets);
 
     fs.mkdirSync(outputDir, { recursive: true });
-    fs.writeFileSync(projectPath, renderProject(projectName));
+    const projectSource = fs.existsSync(projectPath)
+        ? refreshExistingProject(fs.readFileSync(projectPath, "utf8"), projectName)
+        : renderProject(projectName);
+    fs.writeFileSync(projectPath, projectSource);
     fs.writeFileSync(path.join(outputDir, "fp-lib-table"), renderFootprintLibraryTable());
     fs.writeFileSync(schematicPath, renderSchematic(
         filePath,

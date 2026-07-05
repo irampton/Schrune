@@ -761,3 +761,45 @@ module top () {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
 });
+
+test("refreshes an existing KiCad project while preserving board setup and net classes", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const initialResult = writeKiCadFiles(fixture.filePath, compiled);
+        const seededProject = JSON.parse(fs.readFileSync(initialResult.kicadProjectPath, "utf8"));
+        seededProject.board = {
+            design_settings: {
+                defaults: {
+                    track_width: 0.42,
+                },
+            },
+            custom_rule: "keep-board-setup",
+        };
+        seededProject.net_settings = {
+            classes: [{
+                name: "HV",
+                track_width: 0.8,
+                clearance: 0.3,
+            }],
+        };
+        seededProject.schematic.page_layout_descr_file = "custom-layout.kicad_wks";
+        fs.writeFileSync(initialResult.kicadProjectPath, `${JSON.stringify(seededProject, null, 2)}\n`);
+
+        const updatedResult = writeKiCadFiles(fixture.filePath, compiled);
+        const updatedProject = JSON.parse(fs.readFileSync(updatedResult.kicadProjectPath, "utf8"));
+
+        assert.equal(updatedProject.board.custom_rule, "keep-board-setup");
+        assert.equal(updatedProject.board.design_settings.defaults.track_width, 0.42);
+        assert.deepEqual(updatedProject.net_settings.classes, [{
+            name: "HV",
+            track_width: 0.8,
+            clearance: 0.3,
+        }]);
+        assert.equal(updatedProject.schematic.page_layout_descr_file, "custom-layout.kicad_wks");
+        assert.equal(updatedProject.boards[0].filename, "fixture.kicad_pcb");
+        assert.equal(updatedProject.schematic.top_level_sheets[0].filename, "fixture.kicad_sch");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
