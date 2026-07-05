@@ -963,25 +963,6 @@ function footprintMap(pcbSource) {
     return footprints;
 }
 
-function preserveFootprintPlacement(nextFootprint, previousFootprint) {
-    if (!previousFootprint) {
-        return nextFootprint;
-    }
-
-    let output = nextFootprint;
-    const previousAt = previousFootprint.match(/\n(\s*)\(at\s+([^)]+)\)/);
-    if (previousAt) {
-        output = output.replace(/\n(\s*)\(at\s+[^)]+\)/, `\n$1(at ${previousAt[2]})`);
-    }
-
-    const previousLayer = previousFootprint.match(/^\s*\(footprint\s+"[^"]+"\s+\(layer\s+"([^"]+)"\)/);
-    if (previousLayer) {
-        output = output.replace(/^(\s*\(footprint\s+"[^"]+"\s+\(layer\s+)"[^"]+"(\))/, `$1"${previousLayer[1]}"$2`);
-    }
-
-    return output;
-}
-
 function remapPcbItemNetNumbers(pcbSource, previousNetNumbers, nextNetNumbers) {
     return pcbSource.replace(/\(net\s+(\d+)\)/g, (match, numberText) => {
         const previousName = previousNetNumbers.get(Number(numberText));
@@ -1014,8 +995,6 @@ function refreshExistingPcb(existingPcb, nextPcb) {
     const nextFootprintExpressions = findChildExpressions(nextPcb, nextRootOpenIndex, "footprint");
     const nextNetNumbersByName = new Map([...parsePcbNetMap(nextPcb)].map(([number, name]) => [name, number]));
     const previousNetNumbers = parsePcbNetMap(existingPcb);
-    const previousFootprints = footprintMap(existingPcb);
-
     let refreshed = remapPcbItemNetNumbers(existingPcb, previousNetNumbers, nextNetNumbersByName);
     const refreshedRootOpenIndex = refreshed.indexOf("(kicad_pcb");
     const existingNetExpressions = findChildExpressions(refreshed, refreshedRootOpenIndex, "net");
@@ -1026,10 +1005,13 @@ function refreshExistingPcb(existingPcb, nextPcb) {
 
     const refreshedRootAfterNets = refreshed.indexOf("(kicad_pcb");
     const existingFootprintExpressions = findChildExpressions(refreshed, refreshedRootAfterNets, "footprint");
+    const existingFootprints = footprintMap(refreshed);
     const nextFootprintBlock = nextFootprintExpressions
         .map((expression) => {
             const reference = footprintReference(expression.source);
-            return preserveFootprintPlacement(expression.source, previousFootprints.get(reference));
+            return reference && existingFootprints.has(reference)
+                ? existingFootprints.get(reference)
+                : expression.source;
         })
         .join("\n");
 

@@ -713,7 +713,11 @@ module top () {
             `    (net ${initialGndNet})`,
             `  )`,
         ].join("\n");
-        const movedPcb = initialPcb.replace(/\n(\s*)\(at\s+[^)]+\)/, "\n$1(at 99.00 88.00 45)");
+        const movedPcb = initialPcb
+            .replace(/\n(\s*)\(at\s+[^)]+\)/, "\n$1(at 99.00 88.00 45)")
+            .replace(/\n\s+\(property "Value" "TestPart"\)/, '\n    (property "Value" "TestPart")\n    (property "Custom" "keep-me")')
+            .replace(/\(fp_text reference "U1" \(at 0 -2 0\) \(layer "F\.SilkS"\)/, '(fp_text reference "U1" (at 4.50 -6.25 90) (layer "B.SilkS"))')
+            .replace(/\(fp_text value "TestPart" \(at 0 2 0\) \(layer "F\.Fab"\)/, '(fp_text value "TestPart" (at -3.00 7.50 180) (layer "F.Fab"))');
         const closingIndex = movedPcb.lastIndexOf("\n)");
         const seededPcb = closingIndex === -1
             ? `${movedPcb}\n${segmentBlock}\n`
@@ -745,6 +749,9 @@ module top () {
         assert.notEqual(updatedPcb, seededPcb);
         assert.match(updatedPcb, /\(footprint "Schrune:EarlierPart"/);
         assert.match(updatedPcb, /\(footprint "Schrune:TestPart"[\s\S]*?\(at 99\.00 88\.00 45\)/);
+        assert.match(updatedPcb, /\(footprint "Schrune:TestPart"[\s\S]*?\(property "Custom" "keep-me"\)/);
+        assert.match(updatedPcb, /\(footprint "Schrune:TestPart"[\s\S]*?\(fp_text reference "U1" \(at 4\.50 -6\.25 90\) \(layer "B\.SilkS"\)/);
+        assert.match(updatedPcb, /\(footprint "Schrune:TestPart"[\s\S]*?\(fp_text value "TestPart" \(at -3\.00 7\.50 180\) \(layer "F\.Fab"\)/);
         assert.match(updatedPcb, new RegExp(`\\(segment[\\s\\S]*?\\(net ${updatedGndNet}\\)`));
         assert.match(updatedSchematic, /\(symbol \(lib_id "EarlierPart"[\s\S]*?\(property "Reference" "U2"/);
         assert.match(updatedSchematic, /\(symbol \(lib_id "TestPart"[\s\S]*?\(property "Reference" "U1"/);
