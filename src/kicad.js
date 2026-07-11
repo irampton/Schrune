@@ -870,6 +870,11 @@ function renderPcb(filePath, compiled, assets, placements, options = {}) {
     ].join("\n");
 }
 
+function renderEmptyPcb(filePath, options = {}) {
+    const projectName = options.projectName || path.basename(filePath, ".schrune");
+    return renderPcb(filePath, { components: [], netList: new Map() }, new Map(), new Map(), { projectName });
+}
+
 function findChildExpressions(source, parentOpenIndex, childName) {
     const parentCloseIndex = findMatching(source, parentOpenIndex);
     const matches = [];
@@ -1112,6 +1117,7 @@ function collectAssets(filePath, compiled) {
 }
 
 function writeKiCadFiles(filePath, compiled, options = {}) {
+    const updateLayout = options.updateLayout !== false;
     const projectName = options.projectName || path.basename(filePath, ".schrune");
     const outputPaths = buildPathsForEntry(filePath, projectName);
     const outputDir = outputPaths.buildDir;
@@ -1173,11 +1179,15 @@ function writeKiCadFiles(filePath, compiled, options = {}) {
         moduleSchematicPaths[entry.name] = modulePath;
     }
 
-    const nextPcb = renderPcb(filePath, compiled, assets, componentPlacement(compiled), { projectName });
-    const pcbSource = fs.existsSync(pcbPath)
-        ? refreshExistingPcb(fs.readFileSync(pcbPath, "utf8"), nextPcb)
-        : nextPcb;
-    fs.writeFileSync(pcbPath, pcbSource);
+    if (updateLayout) {
+        const nextPcb = renderPcb(filePath, compiled, assets, componentPlacement(compiled), { projectName });
+        const pcbSource = fs.existsSync(pcbPath)
+            ? refreshExistingPcb(fs.readFileSync(pcbPath, "utf8"), nextPcb)
+            : nextPcb;
+        fs.writeFileSync(pcbPath, pcbSource);
+    } else if (!fs.existsSync(pcbPath)) {
+        fs.writeFileSync(pcbPath, renderEmptyPcb(filePath, { projectName }));
+    }
 
     return {
         ...compiled,
@@ -1194,6 +1204,7 @@ module.exports = {
     collectAssets,
     componentPlacement,
     flattenPins,
+    renderEmptyPcb,
     renderPcb,
     renderSchematic,
     writeKiCadFiles,

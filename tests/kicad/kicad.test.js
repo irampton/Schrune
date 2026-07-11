@@ -253,6 +253,71 @@ test("writes KiCad project, schematic, and PCB files", () => {
     }
 });
 
+test("can create an empty PCB without populating layout", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled, { updateLayout: false });
+
+        assert.equal(fs.existsSync(result.kicadProjectPath), true);
+        assert.equal(fs.existsSync(result.schematicPath), true);
+        assert.equal(fs.existsSync(result.pcbPath), true);
+
+        const project = fs.readFileSync(result.kicadProjectPath, "utf8");
+        const schematic = fs.readFileSync(result.schematicPath, "utf8");
+        const pcb = fs.readFileSync(result.pcbPath, "utf8");
+
+        assert.match(project, /"boards": \[\s*\{\s*"filename": "fixture\.kicad_pcb"/s);
+        assert.match(project, /"top_level_sheets": \[\s*\{\s*"filename": "fixture\.kicad_sch"/s);
+        assert.match(schematic, /\(symbol \(lib_id "TestPart"/);
+        assert.match(pcb, /\(kicad_pcb \(version 20260206\) \(generator "Schrune"\) \(generator_version "10\.0"\)/);
+        assert.match(pcb, /\(net 0 ""\)/);
+        assert.doesNotMatch(pcb, /\(net \d+ "GND"\)/);
+        assert.doesNotMatch(pcb, /\(footprint /);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("leaves an existing PCB untouched when layout updates are disabled", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const initialResult = writeKiCadFiles(fixture.filePath, compiled);
+        const seededPcb = `${fs.readFileSync(initialResult.pcbPath, "utf8")}\n; keep this exact sentinel\n`;
+        fs.writeFileSync(initialResult.pcbPath, seededPcb);
+
+        const updatedResult = writeKiCadFiles(fixture.filePath, compiled, { updateLayout: false });
+        const updatedPcb = fs.readFileSync(updatedResult.pcbPath, "utf8");
+
+        assert.equal(updatedPcb, seededPcb);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("refreshes the footprint library when layout updates are disabled", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const initialResult = writeKiCadFiles(fixture.filePath, compiled);
+        const seededPcb = `${fs.readFileSync(initialResult.pcbPath, "utf8")}\n; keep this exact sentinel\n`;
+        fs.writeFileSync(initialResult.pcbPath, seededPcb);
+
+        const footprintPath = path.join(fixture.dir, "parts", "TestPart", "TestPart.kicad_mod");
+        fs.writeFileSync(footprintPath, footprintFile.replace(/\(attr smd\)/, "(attr smd)\n  (descr \"updated footprint\")"));
+
+        const updatedResult = writeKiCadFiles(fixture.filePath, compiled, { updateLayout: false });
+        const updatedPcb = fs.readFileSync(updatedResult.pcbPath, "utf8");
+        const libraryFootprint = fs.readFileSync(path.join(updatedResult.footprintLibraryPath, "TestPart.kicad_mod"), "utf8");
+
+        assert.equal(updatedPcb, seededPcb);
+        assert.match(libraryFootprint, /\(descr "updated footprint"\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("connects imported vertical pins at their electrical endpoints and rotates labels", () => {
     const fixture = makeFixture({
         partFile: `part VerticalPart {

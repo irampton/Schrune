@@ -8,7 +8,7 @@ The compiler entry point is `src/app.js`, exposed as the `shrune` command when
 the package is installed.
 
 ```
-shrune build [--keep-js] path/to/file.schrune
+shrune build [-l|--update-layout] [--keep-js] path/to/file.schrune
 shrune add C2040
 ```
 
@@ -312,7 +312,8 @@ build/{filename}.kicad_pcb
 
 If the PCB file already exists, Schrune leaves it untouched and only rewrites
 the schematic files. That lets you use KiCad's "Update PCB from Schematic"
-workflow after a rebuild.
+workflow after a rebuild. Pass `-l` or `--update-layout` to `schrune build` to
+refresh and populate the PCB layout during the build instead.
 
 The schematic embeds each imported symbol definition, places each component on a
 grid, then connects every connected pin to a short wire and a net label with the
