@@ -2,8 +2,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { EventEmitter } = require("node:events");
 const test = require("node:test");
-const { requireStatementForPart, installProjectParts } = require("../../src/app");
+const { requireStatementForPart, installEasyeda2Kicad, installProjectParts } = require("../../src/app");
 const { writeProjectConfig, findProjectConfigInDirectory } = require("../../src/project");
 const { lockPathFor } = require("../../src/bom");
 
@@ -113,4 +114,24 @@ test("requireStatementForPart prints a part requirement", () => {
     );
 
     assert.equal(statement, '@require("RP2040");');
+});
+
+test("installEasyeda2Kicad launches the packaged installer independently of cwd", async () => {
+    const calls = [];
+    const child = new EventEmitter();
+
+    const installing = installEasyeda2Kicad({
+        spawn(command, args, options) {
+            calls.push({ command, args, options });
+            return child;
+        },
+    });
+    child.emit("exit", 0, null);
+    await installing;
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].command, process.execPath);
+    assert.equal(calls[0].args[0], path.resolve(__dirname, "..", "..", "scripts", "install-easyeda2kicad.js"));
+    assert.equal(Object.hasOwn(calls[0].options, "cwd"), false);
+    assert.equal(calls[0].options.stdio, "inherit");
 });

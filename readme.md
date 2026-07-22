@@ -54,11 +54,11 @@ schrune add C29823
 If you need to install that dependency into the current Python environment:
 
 ```bash
-npm run setup:easyeda2kicad
+schrune tools install-easyeda2kicad
 ```
 
 If your system needs a specific interpreter, set `EASYEDA2KICAD_PYTHON` before
-running the setup script.
+running the command. It can be run from any directory.
 
 ## Syntax
 

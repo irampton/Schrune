@@ -6,8 +6,17 @@ const test = require("node:test");
 const {
     addLcscPart,
     extractPinsFromEasyEdaSymbol,
+    formatBridgeFailure,
     sanitizeIdentifier,
 } = require("../../src/lcsc");
+
+test("missing converter error points to the cwd-independent CLI installer", () => {
+    const message = formatBridgeFailure(["python: exited 1"]);
+
+    assert.match(message, /schrune tools install-easyeda2kicad/);
+    assert.doesNotMatch(message, /npm run setup:easyeda2kicad/);
+    assert.match(message, /python: exited 1/);
+});
 
 function response(body, ok = true, status = 200) {
     return {

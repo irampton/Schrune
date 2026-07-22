@@ -21,8 +21,8 @@ component data, exports KiCad symbol and footprint files (`.kicad_sym` and
 the 3D model as a `.step` through EasyEDA's model UUID endpoint, and writes a
 `<PartName>.schrune` file with component metadata and pin mappings. The Python
 package must already be installed in a usable interpreter before the importer is
-needed. Use `npm run setup:easyeda2kicad` to install it into the current Python
-environment. If the STEP payload is empty, an EasyEDA error document, or
+needed. Use `schrune tools install-easyeda2kicad` to install it into the current
+Python environment. If the STEP payload is empty, an EasyEDA error document, or
 otherwise not directly available, the part is generated without a model file.
 
 ## Step 1 - Compile to JS
