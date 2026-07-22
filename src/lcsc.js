@@ -286,7 +286,7 @@ function pythonEnvironment(pythonPath) {
 function formatBridgeFailure(attempts) {
     const lines = [
         "easyeda2kicad is required to import LCSC parts.",
-        "Run `npm run setup:easyeda2kicad` first, or configure a usable Python interpreter.",
+        "Run `schrune tools install-easyeda2kicad`, or configure a usable Python interpreter.",
     ];
 
     if (attempts.length) {
@@ -397,6 +397,7 @@ module.exports = {
     addLcscPart,
     extractPinsFromEasyEdaSymbol,
     fetchEasyEdaComponent,
+    formatBridgeFailure,
     runEasyeda2KicadBridge,
     sanitizeIdentifier,
 };

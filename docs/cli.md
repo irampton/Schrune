@@ -15,11 +15,11 @@ If you plan to import LCSC parts, install the Python converter into the active
 Python environment first:
 
 ```bash
-npm run setup:easyeda2kicad
+schrune tools install-easyeda2kicad
 ```
 
 If you need a specific interpreter, set `EASYEDA2KICAD_PYTHON` before running
-the script.
+the command. The command can be run from any directory.
 
 ## Commands
 
@@ -99,6 +99,12 @@ Without `-n`, the per-board pricing columns assume 5 boards and the output
 shows summary assembly estimates. With `-n`, the per-board pricing columns use
 that board count, the output includes full economic and standard line-item
 breakdowns for that quantity, and it reports potential stock shortages.
+
+### `schrune tools install-easyeda2kicad`
+
+Install the Python `easyeda2kicad` package into the first usable Python
+interpreter. Set `EASYEDA2KICAD_PYTHON` to prefer a specific interpreter. This
+command can be run from any directory.
 
 ## Flags
 
