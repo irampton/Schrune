@@ -1,9 +1,6 @@
 # Todo List
 
 ## High
-* Test point class
-  * Parts with a single pin can just connect to a net?
-  * Variable size
 
 ## Medium
 

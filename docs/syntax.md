@@ -163,8 +163,16 @@ The built-in primitives are:
 * `Capacitor`
 * `Inductor`
 * `Diode`
+* `TestPoint`
 
 For primitive parts, either `value` or `LCSC` must be provided unless the part is selected through the BOM pipeline.
+
+`TestPoint` is a single-contact built-in and does not require a value. It uses KiCad's
+`Connector:TestPoint` symbol and the standard `TestPoint:TestPoint_Pad_*` footprints.
+Its `size` defaults to `"1mm"`; supported sizes are `1mm`, `1.5mm`, `2mm`, `2.5mm`,
+`3mm`, and `4mm`. Its `shape` defaults to `"round"` and may also be `"square"`
+(`"circular"` is accepted as an alias for `"round"`). Connect it as `TP1`, `TP1.0`,
+or `TP1[0]`.
 
 Array instances are supported:
 

@@ -764,16 +764,17 @@ function requiredFiles(filePath, loaded = new Set(), projectRoot = path.dirname(
 }
 
 function createPrimitiveTemplates() {
-    const names = ["Resistor", "Capacitor", "Diode", "Inductor"];
+    const names = ["Resistor", "Capacitor", "Diode", "Inductor", "TestPoint"];
     const prefixes = {
         Resistor: "R",
         Capacitor: "C",
         Diode: "D",
         Inductor: "L",
+        TestPoint: "TP",
     };
     return new Map(names.map((name) => [name, {
         name,
-        primitive: true,
+        primitive: name !== "TestPoint",
         info: {
             partNumber: name,
             manufacture: "Generic",
@@ -783,14 +784,20 @@ function createPrimitiveTemplates() {
             LCSC: undefined,
             designatorPrefix: prefixes[name],
         },
-        pins: [
-            { name: "0", pad: 0 },
-            { name: "1", pad: 1 },
-        ],
+        pins: name === "TestPoint"
+            ? [{ name: "0", pad: 1 }]
+            : [
+                { name: "0", pad: 0 },
+                { name: "1", pad: 1 },
+            ],
     }]));
 }
 
 function createComponent(template, params = {}) {
+    if (template.name === "TestPoint") {
+        const TestPoint = require("./include/testpoint");
+        return new TestPoint(params);
+    }
     if (template.primitive && !("value" in params) && !("LCSC" in params) && !("lcsc" in params)) {
         throw new Error(`${template.name} requires a value or LCSC part`);
     }
@@ -1451,6 +1458,19 @@ function readEndpoint(expression, componentsByName, nets, scope = {}, modulesByN
             const component = getComponentValue(componentsByName, componentRef);
             if (component) {
                 const pinPaths = collectLeafPinPaths(component.pins);
+                if (pinPaths.length === 1) {
+                    const componentName = componentRefName(componentRef, scope);
+                    const path = pinPaths[0];
+                    const suffix = path.map((part) => /^\d+$/.test(String(part)) ? `[${part}]` : `.${part}`).join("");
+                    return {
+                        type: "pin",
+                        componentRef,
+                        path,
+                        key: `${componentName}${suffix}`,
+                        defaultNetName: `${componentName}_${path.map(String).join("_")}`,
+                        pin: getPinFromPath(component, path),
+                    };
+                }
                 if (pinPaths.length === 2) {
                     throw new Error(`Component "${expression}" is a bridge part. Use "~>" instead of "~": "${expression}"`);
                 }
@@ -3193,6 +3213,18 @@ function renderRuntimeHelpers() {
         `    }\n` +
         `\n` +
         `    function __connect(left, right) {\n` +
+        `        for (const endpoint of [left, right]) {\n` +
+        `            if (endpoint.type !== "net" || !endpoint.ref || !endpoint.ref.pins) {\n` +
+        `                continue;\n` +
+        `            }\n` +
+        `            const paths = __leafPinPaths(endpoint.ref.pins);\n` +
+        `            if (paths.length === 1) {\n` +
+        `                const componentName = endpoint.ref.__schrune && endpoint.ref.__schrune.name || endpoint.ref.constructor.name;\n` +
+        `                const path = paths[0];\n` +
+        `                Object.assign(endpoint, __pin(endpoint.ref, path, componentName + "_" + path.map(String).join("_")));\n` +
+        `                delete endpoint.ref;\n` +
+        `            }\n` +
+        `        }\n` +
         `        const resolveAlias = (name) => {\n` +
         `            while (netAliases.has(name)) {\n` +
         `                name = netAliases.get(name);\n` +

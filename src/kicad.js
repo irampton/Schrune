@@ -77,9 +77,69 @@ function candidateAssetNames(component, extension, infoKey) {
     return [...names];
 }
 
+function kiCadLibraryRoots(kind) {
+    const suffix = kind === "symbol" ? "symbols" : "footprints";
+    const environmentSuffix = kind === "symbol" ? "SYMBOL_DIR" : "FOOTPRINT_DIR";
+    const environmentNames = Object.keys(process.env)
+        .filter((name) => name === `KICAD_${environmentSuffix}` || new RegExp(`^KICAD\\d+_${environmentSuffix}$`).test(name));
+    const roots = environmentNames.map((name) => process.env[name]).filter(Boolean);
+
+    if (process.platform === "win32") {
+        for (const programFiles of [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]].filter(Boolean)) {
+            const kiCadDir = path.join(programFiles, "KiCad");
+            if (!fs.existsSync(kiCadDir)) {
+                continue;
+            }
+            const versions = fs.readdirSync(kiCadDir, { withFileTypes: true })
+                .filter((entry) => entry.isDirectory())
+                .map((entry) => entry.name)
+                .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
+            roots.push(...versions.map((version) => path.join(kiCadDir, version, "share", "kicad", suffix)));
+        }
+    } else {
+        roots.push(
+            `/usr/share/kicad/${suffix}`,
+            `/usr/local/share/kicad/${suffix}`,
+            `/Applications/KiCad/KiCad.app/Contents/SharedSupport/${suffix}`
+        );
+    }
+
+    return [...new Set(roots)];
+}
+
+function parseKiCadAssetReference(reference) {
+    const match = String(reference || "").match(/^(?:kicad:)?([^:\\/]+):([^:\\/]+)$/);
+    return match && { library: match[1], name: match[2] };
+}
+
+function resolveKiCadAsset(reference, extension, infoKey) {
+    const parsed = parseKiCadAssetReference(reference);
+    if (!parsed) {
+        return undefined;
+    }
+    const kind = infoKey === "symbol" ? "symbol" : "footprint";
+    const relativePath = kind === "symbol"
+        ? `${parsed.library}.kicad_sym`
+        : path.join(`${parsed.library}.pretty`, `${parsed.name}.kicad_mod`);
+    const assetPath = kiCadLibraryRoots(kind)
+        .map((root) => path.join(root, relativePath))
+        .find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+    if (!assetPath) {
+        throw new Error(`Could not find KiCad ${kind} ${parsed.library}:${parsed.name} in the installed KiCad libraries`);
+    }
+    if (path.extname(assetPath) !== extension) {
+        throw new Error(`KiCad ${kind} ${parsed.library}:${parsed.name} has an unexpected file type`);
+    }
+    return assetPath;
+}
+
 function resolveAsset(filePath, component, extension, infoKey) {
     const sourceDir = path.dirname(filePath);
     const info = component.info || {};
+    const kiCadAsset = resolveKiCadAsset(info[infoKey], extension, infoKey);
+    if (kiCadAsset) {
+        return kiCadAsset;
+    }
     const direct = info[infoKey] && path.resolve(sourceDir, info[infoKey]);
     if (direct && fs.existsSync(direct) && fs.statSync(direct).isFile()) {
         return direct;
@@ -242,10 +302,15 @@ function findChildExpression(source, parentOpenIndex, childName) {
     return undefined;
 }
 
-function extractSymbol(symbolText) {
+function extractSymbol(symbolText, requestedName) {
     const libraryOpenIndex = symbolText.indexOf("(kicad_symbol_lib");
     if (libraryOpenIndex !== -1) {
-        const symbolBlock = findChildExpression(symbolText, libraryOpenIndex, "symbol");
+        const symbolBlock = requestedName
+            ? findChildExpressions(symbolText, libraryOpenIndex, "symbol").find((entry) => {
+                const match = entry.source.match(/^\(symbol\s+"([^"]+)"/);
+                return match && match[1] === requestedName;
+            })
+            : findChildExpression(symbolText, libraryOpenIndex, "symbol");
         if (!symbolBlock) {
             throw new Error("KiCad symbol file does not contain a symbol");
         }
@@ -1103,7 +1168,8 @@ function collectAssets(filePath, compiled) {
     for (const component of compiled.components) {
         const symbolPath = resolveAsset(filePath, component, ".kicad_sym", "symbol");
         const footprintPath = resolveAsset(filePath, component, ".kicad_mod", "footprint");
-        const extracted = extractSymbol(fs.readFileSync(symbolPath, "utf8"));
+        const symbolReference = parseKiCadAssetReference(component.info && component.info.symbol);
+        const extracted = extractSymbol(fs.readFileSync(symbolPath, "utf8"), symbolReference && symbolReference.name);
         assets.set(component, {
             ...extracted,
             footprintName: path.basename(footprintPath, ".kicad_mod"),

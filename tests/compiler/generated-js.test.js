@@ -266,6 +266,29 @@ module top () {
     }
 });
 
+test("kept Step 1 JavaScript supports TestPoint defaults, footprints, and bare connections", () => {
+    const fixture = makeFixture(`module top () {
+    net signal;
+    part TP1 = new TestPoint();
+    TP1 ~ signal;
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        const generated = fs.readFileSync(generatedPath, "utf8");
+        assert.match(generated.replace(/\\\\/g, "/"), /const TestPoint = require\(".*src\/include\/testpoint\.js"\);/);
+
+        delete require.cache[require.resolve(generatedPath)];
+        const result = require(generatedPath)();
+        assert.equal(result.components[0].footprint, "TestPoint:TestPoint_Pad_D1.0mm");
+        assert.equal(result.components[0].pins[0].net, "signal");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("kept Step 1 JavaScript bridges numbered two-pin parts", () => {
     const numberedPart = `part NumberedTwoPin {
     info: {

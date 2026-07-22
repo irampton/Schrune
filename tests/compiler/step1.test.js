@@ -488,6 +488,51 @@ module top () {
     });
 });
 
+test("creates TestPoints with KiCad pad footprints and supports every single-pin connection form", () => {
+    withFixture(`module top () {
+    net first;
+    net second;
+    net third;
+    part TP1 = new TestPoint();
+    part TP2 = new TestPoint(size = "1.5mm", shape = "square");
+    part TP3 = new TestPoint(size = "4mm", shape = "circular");
+    TP1.0 ~ first;
+    TP2[0] ~ second;
+    TP3 ~ third;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        const [tp1, tp2, tp3] = result.components;
+
+        assert.equal(tp1.constructor.name, "TestPoint");
+        assert.equal(tp1.size, "1mm");
+        assert.equal(tp1.shape, "round");
+        assert.equal(tp1.info.symbol, "Connector:TestPoint");
+        assert.equal(tp1.footprint, "TestPoint:TestPoint_Pad_D1.0mm");
+        assert.equal(tp1.pins[0].net, "first");
+        assert.equal(tp2.footprint, "TestPoint:TestPoint_Pad_1.5x1.5mm");
+        assert.equal(tp2.pins[0].net, "second");
+        assert.equal(tp3.footprint, "TestPoint:TestPoint_Pad_D4.0mm");
+        assert.equal(tp3.pins[0].net, "third");
+    });
+});
+
+test("rejects unsupported TestPoint sizes and shapes", () => {
+    withFixture(`module top () {
+    part TP1 = new TestPoint(size = "1.2mm");
+}
+`, (filePath) => {
+        assert.throws(() => step1(filePath), /Unsupported TestPoint size "1.2mm"/);
+    });
+
+    withFixture(`module top () {
+    part TP1 = new TestPoint(shape = "hexagonal");
+}
+`, (filePath) => {
+        assert.throws(() => step1(filePath), /Unsupported TestPoint shape "hexagonal"/);
+    });
+});
+
 test("requires a value for primitive components", () => {
     withFixture(`@require("TestPart");
 
