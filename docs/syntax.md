@@ -172,7 +172,8 @@ For primitive parts, either `value` or `LCSC` must be provided unless the part i
 Its `size` defaults to `"1mm"`; supported sizes are `1mm`, `1.5mm`, `2mm`, `2.5mm`,
 `3mm`, and `4mm`. Its `shape` defaults to `"round"` and may also be `"square"`
 (`"circular"` is accepted as an alias for `"round"`). Connect it as `TP1`, `TP1.0`,
-or `TP1[0]`.
+or `TP1[0]`. Test points are DNP by default; set `TP1.place = true` to include one
+in placement and BOM output.
 
 Array instances are supported:
 

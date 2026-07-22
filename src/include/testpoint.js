@@ -40,7 +40,7 @@ class TestPoint {
             LCSC: undefined,
             designatorPrefix: "TP",
         };
-        this.place = true;
+        this.place = false;
         this.size = size;
         this.shape = normalizedShape;
         this.footprint = this.info.footprint;

@@ -282,6 +282,7 @@ test("kept Step 1 JavaScript supports TestPoint defaults, footprints, and bare c
 
         delete require.cache[require.resolve(generatedPath)];
         const result = require(generatedPath)();
+        assert.equal(result.components[0].place, false);
         assert.equal(result.components[0].footprint, "TestPoint:TestPoint_Pad_D1.0mm");
         assert.equal(result.components[0].pins[0].net, "signal");
     } finally {

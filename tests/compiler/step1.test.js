@@ -505,6 +505,7 @@ test("creates TestPoints with KiCad pad footprints and supports every single-pin
         const [tp1, tp2, tp3] = result.components;
 
         assert.equal(tp1.constructor.name, "TestPoint");
+        assert.equal(tp1.place, false);
         assert.equal(tp1.size, "1mm");
         assert.equal(tp1.shape, "round");
         assert.equal(tp1.info.symbol, "Connector:TestPoint");
