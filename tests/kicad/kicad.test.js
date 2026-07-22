@@ -179,7 +179,7 @@ function makeFixture(options = {}) {
         fs.writeFileSync(path.join(partsDir, "TestPart.kicad_mod"), footprintFile);
     }
     const filePath = path.join(dir, "fixture.schrune");
-    fs.writeFileSync(filePath, options.source || `#include "TestPart.schrune"
+    fs.writeFileSync(filePath, options.source || `@require("TestPart");
 
 module top () {
     rail power;
@@ -335,7 +335,7 @@ test("connects imported vertical pins at their electrical endpoints and rotates 
     ]
 }
 `,
-        source: `#include "VerticalPart.schrune"
+        source: `@require("VerticalPart");
 
 module top () {
     net left;
@@ -398,7 +398,7 @@ test("preserves library pin declaration order in schematic instances", () => {
     ]
 }
 `,
-        source: `#include "ReversedPinPart.schrune"
+        source: `@require("ReversedPinPart");
 
 module top () {
     net left;
@@ -467,7 +467,7 @@ test("handles rail pin groups without recursing forever", () => {
     ]
 }
 `,
-        source: `#include "TestPart.schrune"
+        source: `@require("TestPart");
 
 module top () {
     rail power;
@@ -495,7 +495,7 @@ test("loads compact KiCad symbol libraries across format variations", () => {
     fs.writeFileSync(path.join(partsDir, "TestPart.kicad_sym"), compactSymbolFile);
     fs.writeFileSync(path.join(partsDir, "TestPart.kicad_mod"), footprintFile);
     const filePath = path.join(dir, "fixture.schrune");
-    fs.writeFileSync(filePath, `#include "TestPart.schrune"
+    fs.writeFileSync(filePath, `@require("TestPart");
 
 module top () {
     part u = new TestPart();
@@ -534,7 +534,7 @@ test("uses an explicit project name for generated KiCad filenames", () => {
 test("uses net labels for rail nets instead of power symbols", () => {
     const fixture = makeFixture();
     try {
-        fs.writeFileSync(fixture.filePath, `#include "TestPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("TestPart");
 
 module top () {
     rail power;
@@ -574,7 +574,7 @@ test("spaces grouped passive pairs far enough to avoid overlapping connection st
     ]
 }
 `,
-        source: `#include "TestPart.schrune"
+        source: `@require("TestPart");
 
 module top () {
     rail power;
@@ -606,7 +606,7 @@ module top () {
 
 test("marks do-not-place components in schematic and PCB output", () => {
     const fixture = makeFixture({
-        source: `#include "TestPart.schrune"
+        source: `@require("TestPart");
 
 module top () {
     part u = new TestPart();
@@ -644,7 +644,7 @@ test("embeds downloaded footprint geometry without synthetic repair", () => {
             .replace(/\n\)/, "\n  (fp_arc (start -9.98 -0.00) (end -9.95 1.00) (angle -180.00) (layer F.SilkS) (width 0.25))\n)")
             .replace(/\(fp_text reference[\s\S]*?\n  \)/, "")
             .replace(/\(fp_text value[\s\S]*?\n  \)/, ""));
-        fs.writeFileSync(fixture.filePath, `#include "HeaderPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("HeaderPart");
 
 module top () {
     net left;
@@ -684,7 +684,7 @@ test("throws a build error when a KiCad asset is missing", () => {
 test("writes module components on separate schematic sheets", () => {
     const fixture = makeFixture();
     try {
-        fs.writeFileSync(fixture.filePath, `#include "TestPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("TestPart");
 
 module child () {
     rail power;
@@ -752,7 +752,7 @@ test("refreshes an existing PCB while preserving placement and board items", () 
             fs.writeFileSync(path.join(dir, `${name}.kicad_mod`), footprintFile.replace(/TestPart/g, name));
         }
 
-        fs.writeFileSync(fixture.filePath, `#include "TestPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("TestPart");
 
 module top () {
     rail power;
@@ -789,8 +789,8 @@ module top () {
             : `${movedPcb.slice(0, closingIndex)}\n${segmentBlock}${movedPcb.slice(closingIndex)}`;
         fs.writeFileSync(initialResult.pcbPath, seededPcb);
 
-        fs.writeFileSync(fixture.filePath, `#include "EarlierPart.schrune"
-#include "TestPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("EarlierPart");
+@require("TestPart");
 
 module top () {
     rail power;

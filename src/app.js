@@ -677,23 +677,87 @@ function parseModules(source, filePath) {
     ]));
 }
 
-function includedFiles(filePath, loaded = new Set()) {
+function parseRequireStatements(source, filePath) {
+    const statements = [];
+    const matchedRanges = [];
+    const moduleSelector = String.raw`(?:[A-Za-z_]\w*|\{[ \t]*[A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*[ \t]*\})`;
+    const pattern = new RegExp(
+        String.raw`^[ \t]*@require\([ \t]*(?:(["'])([A-Za-z_]\w*)\1|(${moduleSelector})[ \t]+from[ \t]+(["'])([^"']+)\4)[ \t]*\)[ \t]*;[ \t]*$`,
+        "gm"
+    );
+    let match;
+
+    while ((match = pattern.exec(source)) !== null) {
+        if (match[2]) {
+            statements.push({ kind: "part", name: match[2], index: match.index });
+        } else {
+            const names = match[3].startsWith("{")
+                ? match[3].slice(1, -1).split(",").map((name) => name.trim())
+                : [match[3]];
+            statements.push({ kind: "module", names, path: match[5], index: match.index });
+        }
+        matchedRanges.push([match.index, pattern.lastIndex]);
+    }
+
+    let unmatchedSource = source;
+    for (const [start, end] of matchedRanges.reverse()) {
+        unmatchedSource = `${unmatchedSource.slice(0, start)}${" ".repeat(end - start)}${unmatchedSource.slice(end)}`;
+    }
+    const invalid = unmatchedSource.match(/@require\b/);
+    if (invalid) {
+        throw attachSourceLocation(new Error("Invalid @require() syntax"), filePath, source, invalid.index);
+    }
+
+    return statements;
+}
+
+function resolveRequirement(requirement, requiringFile, projectRoot) {
+    if (requirement.kind === "part") {
+        return path.join(projectRoot, "parts", requirement.name, `${requirement.name}.schrune`);
+    }
+
+    if (path.extname(requirement.path).toLowerCase() !== ".schrune") {
+        throw attachSourceLocation(
+            new Error(`Required module path must be a .schrune file: "${requirement.path}"`),
+            requiringFile,
+            fs.readFileSync(requiringFile, "utf8"),
+            requirement.index
+        );
+    }
+
+    return requirement.path.startsWith("/") || requirement.path.startsWith("\\")
+        ? path.resolve(projectRoot, requirement.path.replace(/^[\\/]+/, ""))
+        : path.resolve(path.dirname(requiringFile), requirement.path);
+}
+
+function requirementDescription(requirement) {
+    return requirement.kind === "part"
+        ? `part "${requirement.name}"`
+        : `module${requirement.names.length === 1 ? "" : "s"} "${requirement.names.join(", ")}"`;
+}
+
+function requiredFiles(filePath, loaded = new Set(), projectRoot = path.dirname(path.resolve(filePath))) {
     const resolvedPath = path.resolve(filePath);
     if (loaded.has(resolvedPath)) {
         return [];
     }
 
     loaded.add(resolvedPath);
-    const baseDir = path.dirname(resolvedPath);
     const rawSource = fs.readFileSync(resolvedPath, "utf8");
     const source = stripComments(rawSource);
-    const includePattern = /^\s*#include\s+["']([^"']+)["']/gm;
     const files = [];
-    let match;
 
-    while ((match = includePattern.exec(source)) !== null) {
-        const includePath = findInclude(baseDir, match[1]);
-        files.push(includePath, ...includedFiles(includePath, loaded));
+    for (const requirement of parseRequireStatements(source, resolvedPath)) {
+        const requiredPath = resolveRequirement(requirement, resolvedPath, projectRoot);
+        if (!fs.existsSync(requiredPath) || !fs.statSync(requiredPath).isFile()) {
+            throw attachSourceLocation(
+                new Error(`Could not resolve required ${requirementDescription(requirement)} at "${requiredPath}"`),
+                resolvedPath,
+                source,
+                requirement.index
+            );
+        }
+        files.push({ ...requirement, filePath: requiredPath }, ...requiredFiles(requiredPath, loaded, projectRoot));
     }
 
     return files;
@@ -804,80 +868,72 @@ function addPins(target, pins, indexed = false) {
     }
 }
 
-function findInclude(baseDir, includeName) {
-    const directPath = path.resolve(baseDir, includeName);
-    if (fs.existsSync(directPath)) {
-        return directPath;
-    }
-    const includeFileNames = path.extname(includeName)
-        ? [includeName]
-        : [includeName, `${includeName}.schrune`];
-
-    const matches = [];
-
-    function walk(dir) {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-            const entryPath = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-                walk(entryPath);
-            } else if (entry.isFile() && includeFileNames.includes(entry.name)) {
-                matches.push(entryPath);
-            }
-        }
-    }
-
-    walk(baseDir);
-
-    if (matches.length === 1) {
-        return matches[0];
-    }
-
-    if (matches.length > 1) {
-        throw new Error(`Include "${includeName}" is ambiguous`);
-    }
-
-    throw new Error(`Could not resolve include "${includeName}"`);
-}
-
-function loadFile(filePath, loaded = new Set()) {
+function loadFile(filePath, loaded = new Map(), projectRoot = path.dirname(path.resolve(filePath))) {
     const resolvedPath = path.resolve(filePath);
     if (loaded.has(resolvedPath)) {
-        return { source: "", templates: new Map(), modules: new Map() };
+        return loaded.get(resolvedPath);
     }
 
-    loaded.add(resolvedPath);
-    const baseDir = path.dirname(resolvedPath);
     const rawSource = fs.readFileSync(resolvedPath, "utf8");
     const source = stripComments(rawSource);
     const templates = createPrimitiveTemplates();
     const modules = new Map();
-    const importMatch = source.match(/^\s*#import\b/m);
-    if (importMatch) {
-        throw attachSourceLocation(new Error("Use #include to add files"), resolvedPath, source, importMatch.index);
+    const legacyImport = source.match(/^\s*#(?:include|import)\b/m);
+    if (legacyImport) {
+        throw attachSourceLocation(new Error("Use @require() to load parts and modules"), resolvedPath, source, legacyImport.index);
     }
 
-    const includePattern = /^\s*#include\s+["']([^"']+)["']/gm;
-    let match;
+    const localTemplates = parsePart(source, resolvedPath);
+    const localModules = parseModules(source, resolvedPath);
+    const result = { source, templates, modules, localTemplates, localModules };
+    loaded.set(resolvedPath, result);
 
-    while ((match = includePattern.exec(source)) !== null) {
-        const includePath = findInclude(baseDir, match[1]);
-        const includeFile = loadFile(includePath, loaded);
-        for (const [name, template] of includeFile.templates) {
+    for (const requirement of parseRequireStatements(source, resolvedPath)) {
+        const requiredPath = resolveRequirement(requirement, resolvedPath, projectRoot);
+        if (!fs.existsSync(requiredPath) || !fs.statSync(requiredPath).isFile()) {
+            throw attachSourceLocation(
+                new Error(`Could not resolve required ${requirementDescription(requirement)} at "${requiredPath}"`),
+                resolvedPath,
+                source,
+                requirement.index
+            );
+        }
+        const requiredFile = loadFile(requiredPath, loaded, projectRoot);
+        const requiredNames = requirement.kind === "part" ? [requirement.name] : requirement.names;
+        const requiredLocals = requirement.kind === "part" ? requiredFile.localTemplates : requiredFile.localModules;
+        for (const requiredName of requiredNames) {
+            if (!requiredLocals.has(requiredName)) {
+                throw attachSourceLocation(
+                    new Error(`Required ${requirement.kind} "${requiredName}" does not exist in "${requiredPath}"`),
+                    resolvedPath,
+                    source,
+                    requirement.index
+                );
+            }
+        }
+        const requiredNameSet = new Set(requiredNames);
+        for (const [name, template] of requiredFile.templates) {
+            if (requiredFile.localTemplates.has(name) && (requirement.kind !== "part" || !requiredNameSet.has(name))) {
+                continue;
+            }
             templates.set(name, template);
         }
-        for (const [name, module] of includeFile.modules) {
+        for (const [name, module] of requiredFile.modules) {
+            if (requiredFile.localModules.has(name) && (requirement.kind !== "module" || !requiredNameSet.has(name))) {
+                continue;
+            }
             modules.set(name, module);
         }
     }
 
-    for (const [name, template] of parsePart(source, resolvedPath)) {
+    for (const [name, template] of localTemplates) {
         templates.set(name, template);
     }
-    for (const [name, module] of parseModules(source, resolvedPath)) {
+    for (const [name, module] of localModules) {
         modules.set(name, module);
     }
 
-    return { source, templates, modules };
+    return result;
 }
 
 function uniqueNetName(preferred, used) {
@@ -3426,22 +3482,23 @@ function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTe
     ].join("\n");
 }
 
-function renderTopJavaScript(filePath) {
-    const { source, modules } = loadFile(filePath);
+function renderTopJavaScript(filePath, projectRoot = path.dirname(path.resolve(filePath))) {
+    const { source, modules } = loadFile(filePath, new Map(), projectRoot);
     const topModule = modules.get("top");
     if (!topModule) {
         throw new Error("No top module found");
     }
 
     const inputDir = path.dirname(filePath);
-    const includes = includedFiles(filePath);
-    const requireLines = includes.map((includePath) => {
-        const templateName = path.basename(includePath, ".schrune");
+    const includes = [...new Map(requiredFiles(filePath, new Set(), projectRoot)
+        .filter((requirement) => requirement.kind === "part")
+        .map((requirement) => [requirement.name, requirement])).values()];
+    const requireLines = includes.map(({ name: templateName, filePath: includePath }) => {
         const jsPath = path.join(path.dirname(includePath), `${templateName}.js`);
         const relativePath = `./${path.relative(inputDir, jsPath).replace(/\\/g, "/").replace(/\.js$/, "")}`;
         return `const ${templateName} = require(${jsString(relativePath)});`;
     });
-    const includeNames = new Set(includes.map((includePath) => path.basename(includePath, ".schrune")));
+    const includeNames = new Set(includes.map(({ name }) => name));
     const primitiveNames = primitiveNamesInModules([...modules.values()], includeNames);
     const primitiveRequireLines = [...new Set(primitiveNames)].map((name) => {
         const includePath = path.join(__dirname, "include", primitiveIncludeFileName(name));
@@ -3477,17 +3534,18 @@ function renderTopJavaScript(filePath) {
     ].filter((line) => line !== undefined).join("\n");
 }
 
-function renderModuleFileJavaScript(filePath) {
-    const { source, modules } = loadFile(filePath);
+function renderModuleFileJavaScript(filePath, projectRoot = path.dirname(path.resolve(filePath))) {
+    const { source, modules } = loadFile(filePath, new Map(), projectRoot);
     const inputDir = path.dirname(filePath);
-    const includes = includedFiles(filePath);
-    const requireLines = includes.map((includePath) => {
-        const templateName = path.basename(includePath, ".schrune");
+    const includes = [...new Map(requiredFiles(filePath, new Set(), projectRoot)
+        .filter((requirement) => requirement.kind === "part")
+        .map((requirement) => [requirement.name, requirement])).values()];
+    const requireLines = includes.map(({ name: templateName, filePath: includePath }) => {
         const jsPath = path.join(path.dirname(includePath), `${templateName}.js`);
         const relativePath = `./${path.relative(inputDir, jsPath).replace(/\\/g, "/").replace(/\.js$/, "")}`;
         return `const ${templateName} = require(${jsString(relativePath)});`;
     });
-    const includeNames = new Set(includes.map((includePath) => path.basename(includePath, ".schrune")));
+    const includeNames = new Set(includes.map(({ name }) => name));
     const primitiveNames = primitiveNamesInModules([...modules.values()], includeNames);
     const primitiveRequireLines = [...new Set(primitiveNames)].map((name) => {
         const includePath = path.join(__dirname, "include", primitiveIncludeFileName(name));
@@ -3528,10 +3586,10 @@ function step1OutputPath(sourceRoot, outputRoot, schrunePath) {
 function materializeStep1JavaScript(filePath, outputRoot) {
     const resolvedPath = path.resolve(filePath);
     const sourceRoot = path.dirname(resolvedPath);
-    const files = [resolvedPath, ...includedFiles(resolvedPath)];
+    const files = [...new Set([resolvedPath, ...requiredFiles(resolvedPath).map(({ filePath: requiredPath }) => requiredPath)])];
 
     for (const schrunePath of files) {
-        const { source, templates } = loadFile(schrunePath);
+        const { source, templates } = loadFile(schrunePath, new Map(), sourceRoot);
         const partName = path.basename(schrunePath, ".schrune");
         const partTemplate = templates.get(partName);
         const outputPath = step1OutputPath(sourceRoot, outputRoot, schrunePath);
@@ -3543,11 +3601,11 @@ function materializeStep1JavaScript(filePath, outputRoot) {
         }
 
         if (extractBlocks(source, "module", { allowParameters: true }).some((module) => module.name === "top")) {
-            fs.writeFileSync(outputPath, renderTopJavaScript(schrunePath));
+            fs.writeFileSync(outputPath, renderTopJavaScript(schrunePath, sourceRoot));
             continue;
         }
 
-        fs.writeFileSync(outputPath, renderModuleFileJavaScript(schrunePath));
+        fs.writeFileSync(outputPath, renderModuleFileJavaScript(schrunePath, sourceRoot));
     }
 }
 
@@ -3667,9 +3725,10 @@ function installedImportedPartExists(partsRoot, partName) {
         && fs.existsSync(path.join(directory, `${partName}.kicad_mod`));
 }
 
-function includeStatementForPart(baseDir, schrunePath) {
-    const relativePath = path.relative(path.resolve(baseDir), path.resolve(schrunePath)).replace(/\\/g, "/");
-    return `#include "${relativePath}"`;
+function requireStatementForPart(baseDir, schrunePath) {
+    void baseDir;
+    const partName = path.basename(path.resolve(schrunePath), ".schrune");
+    return `@require("${partName}");`;
 }
 
 async function installProjectParts(project, options = {}) {
@@ -3778,7 +3837,7 @@ async function main() {
             }
             console.log(`Added ${result.partName}`);
             console.log(`Pins: ${result.pins.length}`);
-            console.log(includeStatementForPart(baseDir, result.schrunePath));
+            console.log(requireStatementForPart(baseDir, result.schrunePath));
             if (!result.modelDownloaded) {
                 console.log("3D STEP model payload was not directly downloadable.");
             }
@@ -3968,7 +4027,7 @@ module.exports = {
     writeDesignatorState,
     materializeStep1JavaScript,
     createProgress,
-    includeStatementForPart,
+    requireStatementForPart,
     installProjectParts,
     buildJlcBom,
     openPathWithDefaultApplication,

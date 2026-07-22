@@ -31,7 +31,10 @@ function makeFixture(source, partFiles = { "TestPart.schrune": basicPart }) {
     fs.mkdirSync(partsDir);
 
     for (const [fileName, content] of Object.entries(partFiles)) {
-        fs.writeFileSync(path.join(partsDir, fileName), content);
+        const partName = path.basename(fileName, ".schrune");
+        const partDir = path.join(partsDir, partName);
+        fs.mkdirSync(partDir, { recursive: true });
+        fs.writeFileSync(path.join(partDir, `${partName}.schrune`), content);
     }
 
     const filePath = path.join(dir, "fixture.schrune");
@@ -59,7 +62,7 @@ function assertGeneratedBuildError(fixturePath, expected) {
 }
 
 test("writes runnable Step 1 JavaScript with --keep-js behavior", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -72,7 +75,7 @@ module top () {
         writeStep1JavaScript(fixture.filePath);
 
         const topJsPath = path.join(fixture.dir, "fixture.js");
-        const partJsPath = path.join(fixture.dir, "parts", "TestPart.js");
+        const partJsPath = path.join(fixture.dir, "parts", "TestPart", "TestPart.js");
         assert.equal(fs.existsSync(topJsPath), true);
         assert.equal(fs.existsSync(partJsPath), true);
 
@@ -90,7 +93,7 @@ module top () {
 });
 
 test("kept Step 1 JavaScript allows module-local renamed rails to join a higher-level net", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module child () {
     rail power;
@@ -143,7 +146,7 @@ test("kept part JavaScript preserves indexed named pin groups", () => {
     ]
 }
 `;
-    const fixture = makeFixture(`#include "GroupedPart.schrune"
+    const fixture = makeFixture(`@require("GroupedPart");
 
 module top () {
     net signal;
@@ -186,7 +189,7 @@ test("kept part JavaScript preserves multi-pad pins and part rails", () => {
     ]
 }
 `;
-    const fixture = makeFixture(`#include "Connector.schrune"
+    const fixture = makeFixture(`@require("Connector");
 
 module top () {
     rail power;
@@ -218,7 +221,7 @@ module top () {
 });
 
 test("kept Step 1 JavaScript preserves loops and branches at runtime", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -243,7 +246,7 @@ module top () {
 
         const generatedPath = path.join(fixture.dir, "fixture.js");
         const generated = fs.readFileSync(generatedPath, "utf8");
-        assert.match(generated, /const Resistor = require\(".*src\/include\/resistor\.js"\);/);
+        assert.match(generated.replace(/\\\\/g, "/"), /const Resistor = require\(".*src\/include\/resistor\.js"\);/);
         assert.doesNotMatch(generated, /class Resistor/);
         assert.match(generated, /for \(let i = 0; i < parts\.length; i\+\+\)/);
         assert.match(generated, /if \(i < 2\)/);
@@ -279,7 +282,7 @@ test("kept Step 1 JavaScript bridges numbered two-pin parts", () => {
     ]
 }
 `;
-    const fixture = makeFixture(`#include "NumberedTwoPin.schrune"
+    const fixture = makeFixture(`@require("NumberedTwoPin");
 
 module top () {
     net left;
@@ -305,7 +308,7 @@ module top () {
 });
 
 test("kept Step 1 JavaScript supports inline net declarations and multi-ties", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     rail power_3v3;
@@ -423,7 +426,7 @@ test("generated Step 1 JavaScript explains when a bridge operator is used withou
 });
 
 test("kept Step 1 JavaScript connects net-like endpoints to rail high by default", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     rail power;
@@ -452,7 +455,7 @@ module top () {
 });
 
 test("kept Step 1 JavaScript expands typed net groups", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     net<i2c> bus_1;
@@ -483,7 +486,7 @@ module top () {
 });
 
 test("kept Step 1 JavaScript applies whole-group typed net renames", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     net<i2c> i2c_bus;
@@ -507,7 +510,7 @@ module top () {
 });
 
 test("kept Step 1 JavaScript supports typed module parameters for rails and net groups", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module child(net GPIO, rail power, val current, net<i2c> bus) {
     part u = new TestPart();

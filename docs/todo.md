@@ -4,9 +4,6 @@
 * Test point class
   * Parts with a single pin can just connect to a net?
   * Variable size
-* Figure out better imports:
-  * Shared modules with their own parts
-  * Common parts folder?
 
 ## Medium
 
@@ -19,9 +16,8 @@
 
 * VSCode Extension
   * Hover over info for parts and modules
-  * Colors for nets, parts, and modules
-  * More intentional colors
   * Disable suggestions in comments
+  * Autoformatter?
 * Add a "bridging" designator to parts with many pins
 * No insertion on basic functions into top file (--keep-js)
 * Some way to back-port (or set) the designators to the .schrune files
@@ -32,4 +28,6 @@
 * Enforce `part` prefix?
 * Add in generic KiCad footprints?
 * Add an export build files function?
+* Modules with their own .json files?
+  * Some sort of library for this
 

@@ -82,8 +82,11 @@ const power = {
 After the nets have stable names, the compiler elaborates the parts used by the
 top module.
 
-1. Resolve each `#include` statement to a Schrune part file.
-2. Parse every included `part Name { ... }` declaration into a part template.
+1. Resolve each part `@require("Name");` to `/parts/Name/Name.schrune` and each
+   module `@require(Name from "/path/file.schrune");` to the named module.
+   Multiple modules can be selected with
+   `@require({First, Second} from "/path/file.schrune");`.
+2. Parse every required `part Name { ... }` declaration into a part template.
    For this first pass, a part template contains:
    - `info: { ... }`
    - `pins: [ name:pad, ... ]`

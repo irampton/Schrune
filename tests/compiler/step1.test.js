@@ -31,7 +31,10 @@ function makeFixture(source, partFiles = { "TestPart.schrune": basicPart }) {
     fs.mkdirSync(partsDir);
 
     for (const [fileName, content] of Object.entries(partFiles)) {
-        fs.writeFileSync(path.join(partsDir, fileName), content);
+        const partName = path.basename(fileName, ".schrune");
+        const partDir = path.join(partsDir, partName);
+        fs.mkdirSync(partDir, { recursive: true });
+        fs.writeFileSync(path.join(partDir, `${partName}.schrune`), content);
     }
 
     const filePath = path.join(dir, "fixture.schrune");
@@ -48,8 +51,8 @@ function withFixture(source, callback) {
     }
 }
 
-test("resolves #include files by searching below the source directory", () => {
-    withFixture(`#include "TestPart.schrune"
+test("requires parts by exact part name", () => {
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -82,7 +85,7 @@ test("connects indexed pins inside named pin groups", () => {
 }
 `;
 
-    const fixture = makeFixture(`#include "GroupedPart.schrune"
+    const fixture = makeFixture(`@require("GroupedPart");
 
 module top () {
     net signal;
@@ -121,7 +124,7 @@ test("connects multi-pad part pins and part rails", () => {
 }
 `;
 
-    const fixture = makeFixture(`#include "Connector.schrune"
+    const fixture = makeFixture(`@require("Connector");
 
 module top () {
     rail power;
@@ -167,7 +170,7 @@ test("connects typed net groups declared in part pins", () => {
 }
 `;
 
-    const fixture = makeFixture(`#include "Sensor.schrune"
+    const fixture = makeFixture(`@require("Sensor");
 
 module top () {
     net<i2c> i2c_bus;
@@ -188,19 +191,84 @@ module top () {
     }
 });
 
-test("rejects #import", () => {
+test("rejects legacy #import syntax", () => {
     withFixture(`#import "TestPart.schrune"
 
 module top () {
     net signal;
 }
 `, (filePath) => {
-        assert.throws(() => step1(filePath), /Use #include/);
+        assert.throws(() => step1(filePath), /Use @require/);
     });
 });
 
+test("requires one or more named modules from an explicit Schrune path", () => {
+    const fixture = makeFixture(`@require({Child, Other} from "/modules/child.schrune");
+
+module top () {
+    mod child = new Child();
+    mod other = new Other();
+}
+`);
+    const modulesDir = path.join(fixture.dir, "modules");
+    fs.mkdirSync(modulesDir);
+    fs.writeFileSync(path.join(modulesDir, "child.schrune"), `@require("TestPart");
+
+module Child () {
+    net signal;
+    part u = new TestPart();
+    u.IN ~ signal;
+}
+
+module Other () {
+    net output;
+}
+`);
+
+    try {
+        const result = step1(fixture.filePath);
+        assert.equal(result.netList.has("child_signal"), true);
+        assert.equal(result.netList.has("other_output"), true);
+        assert.equal(result.components[0].pins.IN.net, "child_signal");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("rejects missing parts, invalid module paths, and missing named modules", () => {
+    const cases = [
+        ['@require("Missing");\nmodule top () {}', /Could not resolve required part "Missing"/],
+        ['@require(Child from "/modules/child.js");\nmodule top () {}', /must be a \.schrune file/],
+        ['@require({Child, Other} from "/modules/child.schrune");\nmodule top () {}', /Required module "Other" does not exist/],
+    ];
+
+    for (const [source, expected] of cases) {
+        const fixture = makeFixture(source);
+        const modulesDir = path.join(fixture.dir, "modules");
+        fs.mkdirSync(modulesDir);
+        fs.writeFileSync(path.join(modulesDir, "child.schrune"), "module Child () {}\n");
+        try {
+            assert.throws(() => step1(fixture.filePath), expected);
+        } finally {
+            fs.rmSync(fixture.dir, { recursive: true, force: true });
+        }
+    }
+});
+
+test("rejects legacy #include and malformed @require syntax", () => {
+    const cases = [
+        ['#include "TestPart.schrune"\nmodule top () {}', /Use @require/],
+        ['@require(TestPart);\nmodule top () {}', /Invalid @require\(\) syntax/],
+        ['@require({} from "/modules/child.schrune");\nmodule top () {}', /Invalid @require\(\) syntax/],
+    ];
+
+    for (const [source, expected] of cases) {
+        withFixture(source, (filePath) => assert.throws(() => step1(filePath), expected));
+    }
+});
+
 test("returns helper module nets when no top module is found", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module helper () {
     net signal;
@@ -212,7 +280,7 @@ module helper () {
 });
 
 test("applies rail and net name overrides", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     rail power;
@@ -231,7 +299,7 @@ module top () {
 });
 
 test("keeps late rail renames on chained connections", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     rail VIN;
@@ -251,7 +319,7 @@ module top () {
 });
 
 test("declares and connects nets with inline multi-tie shorthand", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     rail power_3v3;
@@ -271,7 +339,7 @@ module top () {
 });
 
 test("connects multiple endpoints on one tie line", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -291,7 +359,7 @@ module top () {
 });
 
 test("rejects duplicate declarations and final net names", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -301,7 +369,7 @@ module top () {
         assert.throws(() => step1(filePath), /Duplicate declaration "signal"/);
     });
 
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net first;
@@ -315,7 +383,7 @@ module top () {
 });
 
 test("connects a net to a pin regardless of side", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     rail power;
@@ -330,7 +398,7 @@ module top () {
 });
 
 test("creates implicit nets for pin-to-pin connections", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     part left = new TestPart();
@@ -347,7 +415,7 @@ module top () {
 });
 
 test("renames implicit pin-to-pin nets with pin .name", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     part left = new TestPart();
@@ -365,7 +433,7 @@ module top () {
 });
 
 test("assigns explicit nets to every pin in a pin-to-pin group", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -383,7 +451,7 @@ module top () {
 });
 
 test("rejects connections that join different named nets", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net first;
@@ -400,7 +468,7 @@ module top () {
 });
 
 test("creates primitive two-pin components with constructor parameters", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -421,7 +489,7 @@ module top () {
 });
 
 test("requires a value for primitive components", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     r1 = new Resistor(footprint = "0603");
@@ -443,7 +511,7 @@ test("allows LCSC-selected primitive components without a value", () => {
 });
 
 test("connects bridge operator edges through a two-pin component", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -478,7 +546,7 @@ test("bridges a two-pin part even when its pads are numbered from one", () => {
 }
 `;
 
-    const fixture = makeFixture(`#include "NumberedTwoPin.schrune"
+    const fixture = makeFixture(`@require("NumberedTwoPin");
 
 module top () {
     net left;
@@ -498,7 +566,7 @@ module top () {
 });
 
 test("does not treat package as a primitive footprint", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -517,7 +585,7 @@ module top () {
 });
 
 test("connects chained bridge operators with implicit nets between primitives", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -538,7 +606,7 @@ module top () {
 });
 
 test("rejects bridge middles that are not two-pin components", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -552,7 +620,7 @@ module top () {
 });
 
 test("creates component arrays and executes for loops", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -571,7 +639,7 @@ module top () {
 });
 
 test("strips line comments before compiling statements", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     // The following declaration should still be parsed.
@@ -587,7 +655,7 @@ module top () {
 });
 
 test("instantiates hierarchical modules and connects exported nets", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module child () {
     rail v;
@@ -616,7 +684,7 @@ module top () {
 });
 
 test("connects net-like endpoints to the high side of a rail by default", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     rail power;
@@ -635,7 +703,7 @@ module top () {
 });
 
 test("applies whole-group name overrides to typed nets", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net<i2c> i2c_bus;
@@ -653,7 +721,7 @@ module top () {
 });
 
 test("applies component place overrides", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     part r = new Resistor(value = "0Ohm");
@@ -666,7 +734,7 @@ module top () {
 });
 
 test("allows module-local renamed rails to join a higher-level net", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module child () {
     rail power;
@@ -707,7 +775,7 @@ test("evaluates val declarations in constructor expressions", () => {
 });
 
 test("expands typed net groups across whole-bus and signal connections", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net<i2c> bus_1;
@@ -730,7 +798,7 @@ module top () {
 });
 
 test("passes rail, net, typed net, and val module parameters through with type enforcement", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module LED(net GPIO, rail power, val current, net<i2c> bus) {
     part u = new TestPart();

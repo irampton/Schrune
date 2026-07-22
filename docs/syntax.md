@@ -5,14 +5,26 @@ Schrune is a small hardware description language for building schematics, PCBs, 
 ## File Structure
 
 ```schrune
-#include "Parts.schrune"
+@require("SS14");
+@require(RP2040 from "/RP2040/main.schrune");
+@require({red_LED, yellow_LED, green_LED, blue_LED} from "/LEDs.schrune");
 
 module top () {
     // declarations and connections
 }
 ```
 
-Use `#include` to load other `.schrune` files. The compiler also searches below the source directory for matching files.
+Use `@require("PartName");` to load a part from
+`/parts/PartName/PartName.schrune`. Part lookup is exact; a missing file is a
+build error.
+
+Use `@require(ModuleName from "/path/to/file.schrune");` to load one named
+module from a Schrune file. A leading slash is relative to the project source
+root. Relative paths are resolved from the requiring file. The path must name an
+existing `.schrune` file containing that module.
+
+Use `@require({First, Second} from "/path/to/file.schrune");` to load multiple
+named modules from the same file. Every listed module must exist.
 
 ## Comments
 
@@ -315,6 +327,6 @@ bus_1.CLK ~ clock_source;
 
 ## Notes
 
-* `#import` is not supported.
+* Legacy `#include` and `#import` statements are not supported.
 * The top module must be named `top`.
 * Generated schematic and PCB output is based on the declared nets, parts, and module hierarchy.

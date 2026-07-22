@@ -162,5 +162,7 @@ The build writes:
 
 ## Notes
 
-* `#include` resolves local Schrune files and `.schrune` files under the source tree.
+* `@require("Name");` resolves exactly `parts/Name/Name.schrune`.
+* `@require(Name from "/path/file.schrune");` loads a named module from an explicit Schrune path.
+* `@require({First, Second} from "/path/file.schrune");` loads multiple named modules from one file.
 * The CLI expects either a `.schrune` input file or a nearby `schrune.json` for build mode.
