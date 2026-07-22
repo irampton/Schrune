@@ -8,7 +8,7 @@ The compiler entry point is `src/app.js`, exposed as the `shrune` command when
 the package is installed.
 
 ```
-shrune build [--keep-js] path/to/file.schrune
+shrune build [-l|--update-layout] [--keep-js] path/to/file.schrune
 shrune add C2040
 ```
 
@@ -82,8 +82,11 @@ const power = {
 After the nets have stable names, the compiler elaborates the parts used by the
 top module.
 
-1. Resolve each `#include` statement to a Schrune part file.
-2. Parse every included `part Name { ... }` declaration into a part template.
+1. Resolve each part `@require("Name");` to `/parts/Name/Name.schrune` and each
+   module `@require(Name from "/path/file.schrune");` to the named module.
+   Multiple modules can be selected with
+   `@require({First, Second} from "/path/file.schrune");`.
+2. Parse every required `part Name { ... }` declaration into a part template.
    For this first pass, a part template contains:
    - `info: { ... }`
    - `pins: [ name:pad, ... ]`
@@ -215,7 +218,7 @@ New designators use the lowest unused number for each prefix.
 
 To keep references stable across rebuilds when the component set changes, the
 compiler also writes a hidden designator cache under
-`KiCad/.schrune-designators.json` and reuses it on the next build when
+`build/.schrune-designators.json` and reuses it on the next build when
 possible.
 
 ## Step 3 - Generate BOM
@@ -301,18 +304,19 @@ does not point directly at an asset, the compiler searches under the source
 file's `parts/` tree using the component type, selected MPN, part number, and
 declared symbol/footprint names. Missing or ambiguous assets are build errors.
 
-The compiler writes all KiCad files into a sibling directory next to the target
+The compiler writes all KiCad files into a sibling `build/` directory next to the target
 `.schrune` file:
 
 ```
-KiCad/{filename}.kicad_pro
-KiCad/{filename}.kicad_sch
-KiCad/{filename}.kicad_pcb
+build/{filename}.kicad_pro
+build/{filename}.kicad_sch
+build/{filename}.kicad_pcb
 ```
 
 If the PCB file already exists, Schrune leaves it untouched and only rewrites
 the schematic files. That lets you use KiCad's "Update PCB from Schematic"
-workflow after a rebuild.
+workflow after a rebuild. Pass `-l` or `--update-layout` to `schrune build` to
+refresh and populate the PCB layout during the build instead.
 
 The schematic embeds each imported symbol definition, places each component on a
 grid, then connects every connected pin to a short wire and a net label with the

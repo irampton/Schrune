@@ -5,14 +5,26 @@ Schrune is a small hardware description language for building schematics, PCBs, 
 ## File Structure
 
 ```schrune
-#include "Parts.schrune"
+@require("SS14");
+@require(RP2040 from "/RP2040/main.schrune");
+@require({red_LED, yellow_LED, green_LED, blue_LED} from "/LEDs.schrune");
 
 module top () {
     // declarations and connections
 }
 ```
 
-Use `#include` to load other `.schrune` files. The compiler also searches below the source directory for matching files.
+Use `@require("PartName");` to load a part from
+`/parts/PartName/PartName.schrune`. Part lookup is exact; a missing file is a
+build error.
+
+Use `@require(ModuleName from "/path/to/file.schrune");` to load one named
+module from a Schrune file. A leading slash is relative to the project source
+root. Relative paths are resolved from the requiring file. The path must name an
+existing `.schrune` file containing that module.
+
+Use `@require({First, Second} from "/path/to/file.schrune");` to load multiple
+named modules from the same file. Every listed module must exist.
 
 ## Comments
 
@@ -109,11 +121,31 @@ power.h.name = "VCC";
 power.l.name = "GND";
 ```
 
-Rail sides are accessed with `.h` and `.l`.
+By default, the high side of a rail uses the rail name itself, and the low side
+uses `.l`.
+
+```schrune
+rail power;
+```
+
+This creates default net names:
+
+* `power`
+* `power.l`
+
+Rail sides are still accessed explicitly with `.h` and `.l`.
 
 ```schrune
 power.h ~ part1.VIN;
 power.l ~ part1.GND;
+```
+
+When a net-like endpoint is connected directly to a rail, Schrune connects it to
+the high side by default.
+
+```schrune
+part mcu = new RP2040();
+mcu.VDD ~ power;   // same as mcu.VDD ~ power.h
 ```
 
 ## Parts
@@ -131,8 +163,16 @@ The built-in primitives are:
 * `Capacitor`
 * `Inductor`
 * `Diode`
+* `TestPoint`
 
 For primitive parts, either `value` or `LCSC` must be provided unless the part is selected through the BOM pipeline.
+
+`TestPoint` is a single-contact built-in and does not require a value. It uses KiCad's
+`Connector:TestPoint` symbol and the standard `TestPoint:TestPoint_Pad_*` footprints.
+Its `size` defaults to `"1mm"`; supported sizes are `1mm`, `1.5mm`, `2mm`, `2.5mm`,
+`3mm`, and `4mm`. Its `shape` defaults to `"round"` and may also be `"square"`
+(`"circular"` is accepted as an alias for `"round"`). Connect it as `TP1`, `TP1.0`,
+or `TP1[0]`.
 
 Array instances are supported:
 
@@ -230,6 +270,22 @@ Common properties used by the compiler include:
 * `tolerance`
 * `package`
 
+Part instances also support post-construction property assignment for a small set
+of compiler-recognized fields.
+
+```schrune
+part r = new Resistor(value = "0Ohm");
+r.place = false;
+```
+
+Supported instance property assignments include:
+
+* `.place`
+
+Setting `.place = false` marks the part as do not place (DNP). DNP parts stay in
+the generated schematic and PCB, but they are omitted from the generated BOM and
+emitted into KiCad with DNP markers.
+
 ## `val`
 
 `val` declares a numeric value with a unit, intended for expressions and validation.
@@ -279,6 +335,6 @@ bus_1.CLK ~ clock_source;
 
 ## Notes
 
-* `#import` is not supported.
+* Legacy `#include` and `#import` statements are not supported.
 * The top module must be named `top`.
 * Generated schematic and PCB output is based on the declared nets, parts, and module hierarchy.

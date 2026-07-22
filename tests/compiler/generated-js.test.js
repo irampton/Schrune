@@ -31,7 +31,10 @@ function makeFixture(source, partFiles = { "TestPart.schrune": basicPart }) {
     fs.mkdirSync(partsDir);
 
     for (const [fileName, content] of Object.entries(partFiles)) {
-        fs.writeFileSync(path.join(partsDir, fileName), content);
+        const partName = path.basename(fileName, ".schrune");
+        const partDir = path.join(partsDir, partName);
+        fs.mkdirSync(partDir, { recursive: true });
+        fs.writeFileSync(path.join(partDir, `${partName}.schrune`), content);
     }
 
     const filePath = path.join(dir, "fixture.schrune");
@@ -39,8 +42,27 @@ function makeFixture(source, partFiles = { "TestPart.schrune": basicPart }) {
     return { dir, filePath };
 }
 
+function assertGeneratedBuildError(fixturePath, expected) {
+    writeStep1JavaScript(fixturePath);
+    const generatedPath = path.join(path.dirname(fixturePath), "fixture.js");
+    delete require.cache[require.resolve(generatedPath)];
+    assert.throws(() => require(generatedPath)(), (error) => {
+        assert.equal(error.filePath, fixturePath);
+        if (expected.line !== undefined) {
+            assert.equal(error.line, expected.line);
+        }
+        if (expected.column !== undefined) {
+            assert.equal(error.column, expected.column);
+        }
+        if (expected.message) {
+            assert.match(error.message, expected.message);
+        }
+        return true;
+    });
+}
+
 test("writes runnable Step 1 JavaScript with --keep-js behavior", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -53,7 +75,7 @@ module top () {
         writeStep1JavaScript(fixture.filePath);
 
         const topJsPath = path.join(fixture.dir, "fixture.js");
-        const partJsPath = path.join(fixture.dir, "parts", "TestPart.js");
+        const partJsPath = path.join(fixture.dir, "parts", "TestPart", "TestPart.js");
         assert.equal(fs.existsSync(topJsPath), true);
         assert.equal(fs.existsSync(partJsPath), true);
 
@@ -71,7 +93,7 @@ module top () {
 });
 
 test("kept Step 1 JavaScript allows module-local renamed rails to join a higher-level net", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module child () {
     rail power;
@@ -124,7 +146,7 @@ test("kept part JavaScript preserves indexed named pin groups", () => {
     ]
 }
 `;
-    const fixture = makeFixture(`#include "GroupedPart.schrune"
+    const fixture = makeFixture(`@require("GroupedPart");
 
 module top () {
     net signal;
@@ -167,7 +189,7 @@ test("kept part JavaScript preserves multi-pad pins and part rails", () => {
     ]
 }
 `;
-    const fixture = makeFixture(`#include "Connector.schrune"
+    const fixture = makeFixture(`@require("Connector");
 
 module top () {
     rail power;
@@ -187,10 +209,10 @@ module top () {
         const result = top();
         const pins = result.components[0].pins;
 
-        assert.equal(pins.VBUS.h[0].net, "power_h");
-        assert.equal(pins.VBUS.h[1].net, "power_h");
-        assert.equal(pins.VBUS.l[0].net, "power_l");
-        assert.equal(pins.VBUS.l[1].net, "power_l");
+        assert.equal(pins.VBUS.h[0].net, "power");
+        assert.equal(pins.VBUS.h[1].net, "power");
+        assert.equal(pins.VBUS.l[0].net, "power.l");
+        assert.equal(pins.VBUS.l[1].net, "power.l");
         assert.equal(pins.Dp[0].net, "usb_p");
         assert.equal(pins.Dp[1].net, "usb_p");
     } finally {
@@ -199,7 +221,7 @@ module top () {
 });
 
 test("kept Step 1 JavaScript preserves loops and branches at runtime", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -224,7 +246,7 @@ module top () {
 
         const generatedPath = path.join(fixture.dir, "fixture.js");
         const generated = fs.readFileSync(generatedPath, "utf8");
-        assert.match(generated, /const Resistor = require\(".*src\/include\/resistor\.js"\);/);
+        assert.match(generated.replace(/\\\\/g, "/"), /const Resistor = require\(".*src\/include\/resistor\.js"\);/);
         assert.doesNotMatch(generated, /class Resistor/);
         assert.match(generated, /for \(let i = 0; i < parts\.length; i\+\+\)/);
         assert.match(generated, /if \(i < 2\)/);
@@ -239,6 +261,29 @@ module top () {
         assert.equal(generatedResult.components[0].pins.IN.net, "resistors_0_1");
         assert.equal(generatedResult.components[0].pins.OUT.net, "SIG");
         assert.equal(generatedResult.components[2].pins.OUT.net, "fallback");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("kept Step 1 JavaScript supports TestPoint defaults, footprints, and bare connections", () => {
+    const fixture = makeFixture(`module top () {
+    net signal;
+    part TP1 = new TestPoint();
+    TP1 ~ signal;
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        const generated = fs.readFileSync(generatedPath, "utf8");
+        assert.match(generated.replace(/\\\\/g, "/"), /const TestPoint = require\(".*src\/include\/testpoint\.js"\);/);
+
+        delete require.cache[require.resolve(generatedPath)];
+        const result = require(generatedPath)();
+        assert.equal(result.components[0].footprint, "TestPoint:TestPoint_Pad_D1.0mm");
+        assert.equal(result.components[0].pins[0].net, "signal");
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
@@ -260,7 +305,7 @@ test("kept Step 1 JavaScript bridges numbered two-pin parts", () => {
     ]
 }
 `;
-    const fixture = makeFixture(`#include "NumberedTwoPin.schrune"
+    const fixture = makeFixture(`@require("NumberedTwoPin");
 
 module top () {
     net left;
@@ -286,7 +331,7 @@ module top () {
 });
 
 test("kept Step 1 JavaScript supports inline net declarations and multi-ties", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     rail power_3v3;
@@ -305,7 +350,7 @@ module top () {
         const top = require(generatedPath);
         const result = top();
 
-        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3_h", "power_1v8_h"].sort());
+        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3", "power_1v8"].sort());
         assert.equal(result.nets.gnd, "gnd");
         assert.equal(result.nets.power_3v3.l, "gnd");
         assert.equal(result.nets.power_1v8.l, "gnd");
@@ -340,16 +385,100 @@ module top () {
         const result = top();
 
         assert.equal(result.components[0].value, 5000);
-        assert.deepEqual([...result.netList].sort(), ["power_h", "power_l"]);
-        assert.equal(result.components[0].pins[0].net, "power_h");
-        assert.equal(result.components[0].pins[1].net, "power_l");
+        assert.deepEqual([...result.netList].sort(), ["power", "power.l"]);
+        assert.equal(result.components[0].pins[0].net, "power");
+        assert.equal(result.components[0].pins[1].net, "power.l");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("generated Step 1 JavaScript points bridge mistakes back to the source line", () => {
+    const fixture = makeFixture(`module top () {
+    net left;
+    net right;
+    r1 = new Resistor(value = "10k");
+    left ~ r1 ~ right;
+}
+`);
+
+    try {
+        assertGeneratedBuildError(fixture.filePath, {
+            line: 5,
+            message: /Use "~>" only when a two-pin part sits in the middle/,
+        });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("generated Step 1 JavaScript points net-group mistakes back to the source line", () => {
+    const fixture = makeFixture(`module top () {
+    net<i2c> bus;
+    net signal;
+    bus ~ signal;
+}
+`);
+
+    try {
+        assertGeneratedBuildError(fixture.filePath, {
+            line: 4,
+            message: /Cannot connect net<i2c> "bus" directly to "signal"/,
+        });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("generated Step 1 JavaScript explains when a bridge operator is used without a middle component", () => {
+    const fixture = makeFixture(`module top () {
+    net left;
+    net right;
+    left ~> right;
+}
+`);
+
+    try {
+        assertGeneratedBuildError(fixture.filePath, {
+            line: 4,
+            message: /Bridge connections need a component between the arrows/,
+        });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("kept Step 1 JavaScript connects net-like endpoints to rail high by default", () => {
+    const fixture = makeFixture(`@require("TestPart");
+
+module top () {
+    rail power;
+    net signal;
+    part u = new TestPart();
+    signal ~ power;
+    u.IN ~ power;
+    u.OUT ~ power.l;
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+
+        assert.equal(result.nets.signal, "power");
+        assert.equal(result.components[0].pins.IN.net, "power");
+        assert.equal(result.components[0].pins.OUT.net, "power.l");
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
 });
 
 test("kept Step 1 JavaScript expands typed net groups", () => {
-    const fixture = makeFixture(`#include "TestPart.schrune"
+    const fixture = makeFixture(`@require("TestPart");
 
 module top () {
     net<i2c> bus_1;
@@ -374,6 +503,67 @@ module top () {
         assert.equal(result.components[0].pins[1].net, "bus_2.SDA");
         assert.equal(result.components[1].pins[1].net, "bus_2.SCL");
         assert.deepEqual(result.nets.bus_1, { type: "i2c", SDA: "bus_2.SDA", SCL: "bus_2.SCL" });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("kept Step 1 JavaScript applies whole-group typed net renames", () => {
+    const fixture = makeFixture(`@require("TestPart");
+
+module top () {
+    net<i2c> i2c_bus;
+    i2c_bus.name = "sensors";
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+
+        assert.deepEqual([...result.netList].sort(), ["sensors.SDA", "sensors.SCL"].sort());
+        assert.deepEqual(result.nets.i2c_bus, { type: "i2c", SDA: "sensors.SDA", SCL: "sensors.SCL" });
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("kept Step 1 JavaScript supports typed module parameters for rails and net groups", () => {
+    const fixture = makeFixture(`@require("TestPart");
+
+module child(net GPIO, rail power, val current, net<i2c> bus) {
+    part u = new TestPart();
+    GPIO ~ u.IN;
+    power.l.name = "GND";
+    power.l ~ u.OUT;
+    bus.SDA ~ u[1];
+}
+
+module top () {
+    rail power;
+    net gpio1;
+    net<i2c> i2c_bus;
+    val current = 0.5;
+    mod c = new child(gpio1, power, current, i2c_bus);
+}
+`);
+
+    try {
+        writeStep1JavaScript(fixture.filePath);
+
+        const generatedPath = path.join(fixture.dir, "fixture.js");
+        delete require.cache[require.resolve(generatedPath)];
+        const top = require(generatedPath);
+        const result = top();
+
+        assert.equal(result.components.length, 1);
+        assert.equal(result.components[0].pins.IN.net, "gpio1");
+        assert.equal(result.components[0].pins.OUT.net, "GND");
+        assert.equal(result.components[0].pins[1].net, "i2c_bus.SDA");
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }

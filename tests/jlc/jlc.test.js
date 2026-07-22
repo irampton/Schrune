@@ -43,6 +43,21 @@ test("normalizes JLC product payloads", () => {
     });
 });
 
+test("normalizes promoted extended parts flagged by preferredComponentFlag", () => {
+    const part = normalizeJlcPart({
+        componentCode: "C25755",
+        componentLibraryType: "expand",
+        preferredComponentFlag: true,
+        stockCount: "34936",
+        componentPrices: [
+            { startNumber: 1, endNumber: 999, productPrice: "0.0013" },
+        ],
+    });
+
+    assert.equal(part.isBasic, false);
+    assert.equal(part.isPreferred, true);
+});
+
 test("selects stocked preferred parts before cheaper unavailable parts", () => {
     const selected = selectBestJlcPart([
         { lcsc: "C1", stock: 0, isPreferred: true, isBasic: true, unitCost: 0.001 },

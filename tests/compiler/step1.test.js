@@ -31,7 +31,10 @@ function makeFixture(source, partFiles = { "TestPart.schrune": basicPart }) {
     fs.mkdirSync(partsDir);
 
     for (const [fileName, content] of Object.entries(partFiles)) {
-        fs.writeFileSync(path.join(partsDir, fileName), content);
+        const partName = path.basename(fileName, ".schrune");
+        const partDir = path.join(partsDir, partName);
+        fs.mkdirSync(partDir, { recursive: true });
+        fs.writeFileSync(path.join(partDir, `${partName}.schrune`), content);
     }
 
     const filePath = path.join(dir, "fixture.schrune");
@@ -48,8 +51,8 @@ function withFixture(source, callback) {
     }
 }
 
-test("resolves #include files by searching below the source directory", () => {
-    withFixture(`#include "TestPart.schrune"
+test("requires parts by exact part name", () => {
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -82,7 +85,7 @@ test("connects indexed pins inside named pin groups", () => {
 }
 `;
 
-    const fixture = makeFixture(`#include "GroupedPart.schrune"
+    const fixture = makeFixture(`@require("GroupedPart");
 
 module top () {
     net signal;
@@ -121,7 +124,7 @@ test("connects multi-pad part pins and part rails", () => {
 }
 `;
 
-    const fixture = makeFixture(`#include "Connector.schrune"
+    const fixture = makeFixture(`@require("Connector");
 
 module top () {
     rail power;
@@ -136,10 +139,10 @@ module top () {
         const result = step1(fixture.filePath);
         const pins = result.components[0].pins;
 
-        assert.equal(pins.VBUS.h[0].net, "power_h");
-        assert.equal(pins.VBUS.h[1].net, "power_h");
-        assert.equal(pins.VBUS.l[0].net, "power_l");
-        assert.equal(pins.VBUS.l[1].net, "power_l");
+        assert.equal(pins.VBUS.h[0].net, "power");
+        assert.equal(pins.VBUS.h[1].net, "power");
+        assert.equal(pins.VBUS.l[0].net, "power.l");
+        assert.equal(pins.VBUS.l[1].net, "power.l");
         assert.equal(pins.Dp[0].net, "usb_p");
         assert.equal(pins.Dp[1].net, "usb_p");
         assert.equal(pins.Dp.net, "usb_p");
@@ -167,7 +170,7 @@ test("connects typed net groups declared in part pins", () => {
 }
 `;
 
-    const fixture = makeFixture(`#include "Sensor.schrune"
+    const fixture = makeFixture(`@require("Sensor");
 
 module top () {
     net<i2c> i2c_bus;
@@ -188,19 +191,84 @@ module top () {
     }
 });
 
-test("rejects #import", () => {
+test("rejects legacy #import syntax", () => {
     withFixture(`#import "TestPart.schrune"
 
 module top () {
     net signal;
 }
 `, (filePath) => {
-        assert.throws(() => step1(filePath), /Use #include/);
+        assert.throws(() => step1(filePath), /Use @require/);
     });
 });
 
+test("requires one or more named modules from an explicit Schrune path", () => {
+    const fixture = makeFixture(`@require({Child, Other} from "/modules/child.schrune");
+
+module top () {
+    mod child = new Child();
+    mod other = new Other();
+}
+`);
+    const modulesDir = path.join(fixture.dir, "modules");
+    fs.mkdirSync(modulesDir);
+    fs.writeFileSync(path.join(modulesDir, "child.schrune"), `@require("TestPart");
+
+module Child () {
+    net signal;
+    part u = new TestPart();
+    u.IN ~ signal;
+}
+
+module Other () {
+    net output;
+}
+`);
+
+    try {
+        const result = step1(fixture.filePath);
+        assert.equal(result.netList.has("child_signal"), true);
+        assert.equal(result.netList.has("other_output"), true);
+        assert.equal(result.components[0].pins.IN.net, "child_signal");
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("rejects missing parts, invalid module paths, and missing named modules", () => {
+    const cases = [
+        ['@require("Missing");\nmodule top () {}', /Could not resolve required part "Missing"/],
+        ['@require(Child from "/modules/child.js");\nmodule top () {}', /must be a \.schrune file/],
+        ['@require({Child, Other} from "/modules/child.schrune");\nmodule top () {}', /Required module "Other" does not exist/],
+    ];
+
+    for (const [source, expected] of cases) {
+        const fixture = makeFixture(source);
+        const modulesDir = path.join(fixture.dir, "modules");
+        fs.mkdirSync(modulesDir);
+        fs.writeFileSync(path.join(modulesDir, "child.schrune"), "module Child () {}\n");
+        try {
+            assert.throws(() => step1(fixture.filePath), expected);
+        } finally {
+            fs.rmSync(fixture.dir, { recursive: true, force: true });
+        }
+    }
+});
+
+test("rejects legacy #include and malformed @require syntax", () => {
+    const cases = [
+        ['#include "TestPart.schrune"\nmodule top () {}', /Use @require/],
+        ['@require(TestPart);\nmodule top () {}', /Invalid @require\(\) syntax/],
+        ['@require({} from "/modules/child.schrune");\nmodule top () {}', /Invalid @require\(\) syntax/],
+    ];
+
+    for (const [source, expected] of cases) {
+        withFixture(source, (filePath) => assert.throws(() => step1(filePath), expected));
+    }
+});
+
 test("returns helper module nets when no top module is found", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module helper () {
     net signal;
@@ -212,7 +280,7 @@ module helper () {
 });
 
 test("applies rail and net name overrides", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     rail power;
@@ -231,7 +299,7 @@ module top () {
 });
 
 test("keeps late rail renames on chained connections", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     rail VIN;
@@ -246,12 +314,12 @@ module top () {
         assert.equal(result.nets.VIN.l, "GND");
         assert.equal(result.nets.power_3v3.l, "GND");
         assert.equal(result.nets.power_5v.l, "GND");
-        assert.equal(result.nets.VIN.h, "VIN_h");
+        assert.equal(result.nets.VIN.h, "VIN");
     });
 });
 
 test("declares and connects nets with inline multi-tie shorthand", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     rail power_3v3;
@@ -262,7 +330,7 @@ module top () {
 `, (filePath) => {
         const result = step1(filePath);
 
-        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3_h", "power_1v8_h"].sort());
+        assert.deepEqual([...result.netList].sort(), ["gnd", "power_3v3", "power_1v8"].sort());
         assert.equal(result.nets.gnd, "gnd");
         assert.equal(result.nets.power_3v3.l, "gnd");
         assert.equal(result.nets.power_1v8.l, "gnd");
@@ -271,7 +339,7 @@ module top () {
 });
 
 test("connects multiple endpoints on one tie line", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -291,7 +359,7 @@ module top () {
 });
 
 test("rejects duplicate declarations and final net names", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -301,7 +369,7 @@ module top () {
         assert.throws(() => step1(filePath), /Duplicate declaration "signal"/);
     });
 
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net first;
@@ -315,7 +383,7 @@ module top () {
 });
 
 test("connects a net to a pin regardless of side", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     rail power;
@@ -330,7 +398,7 @@ module top () {
 });
 
 test("creates implicit nets for pin-to-pin connections", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     part left = new TestPart();
@@ -347,7 +415,7 @@ module top () {
 });
 
 test("renames implicit pin-to-pin nets with pin .name", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     part left = new TestPart();
@@ -365,7 +433,7 @@ module top () {
 });
 
 test("assigns explicit nets to every pin in a pin-to-pin group", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -383,7 +451,7 @@ module top () {
 });
 
 test("rejects connections that join different named nets", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net first;
@@ -400,7 +468,7 @@ module top () {
 });
 
 test("creates primitive two-pin components with constructor parameters", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -420,8 +488,53 @@ module top () {
     });
 });
 
+test("creates TestPoints with KiCad pad footprints and supports every single-pin connection form", () => {
+    withFixture(`module top () {
+    net first;
+    net second;
+    net third;
+    part TP1 = new TestPoint();
+    part TP2 = new TestPoint(size = "1.5mm", shape = "square");
+    part TP3 = new TestPoint(size = "4mm", shape = "circular");
+    TP1.0 ~ first;
+    TP2[0] ~ second;
+    TP3 ~ third;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        const [tp1, tp2, tp3] = result.components;
+
+        assert.equal(tp1.constructor.name, "TestPoint");
+        assert.equal(tp1.size, "1mm");
+        assert.equal(tp1.shape, "round");
+        assert.equal(tp1.info.symbol, "Connector:TestPoint");
+        assert.equal(tp1.footprint, "TestPoint:TestPoint_Pad_D1.0mm");
+        assert.equal(tp1.pins[0].net, "first");
+        assert.equal(tp2.footprint, "TestPoint:TestPoint_Pad_1.5x1.5mm");
+        assert.equal(tp2.pins[0].net, "second");
+        assert.equal(tp3.footprint, "TestPoint:TestPoint_Pad_D4.0mm");
+        assert.equal(tp3.pins[0].net, "third");
+    });
+});
+
+test("rejects unsupported TestPoint sizes and shapes", () => {
+    withFixture(`module top () {
+    part TP1 = new TestPoint(size = "1.2mm");
+}
+`, (filePath) => {
+        assert.throws(() => step1(filePath), /Unsupported TestPoint size "1.2mm"/);
+    });
+
+    withFixture(`module top () {
+    part TP1 = new TestPoint(shape = "hexagonal");
+}
+`, (filePath) => {
+        assert.throws(() => step1(filePath), /Unsupported TestPoint shape "hexagonal"/);
+    });
+});
+
 test("requires a value for primitive components", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     r1 = new Resistor(footprint = "0603");
@@ -443,7 +556,7 @@ test("allows LCSC-selected primitive components without a value", () => {
 });
 
 test("connects bridge operator edges through a two-pin component", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -478,7 +591,7 @@ test("bridges a two-pin part even when its pads are numbered from one", () => {
 }
 `;
 
-    const fixture = makeFixture(`#include "NumberedTwoPin.schrune"
+    const fixture = makeFixture(`@require("NumberedTwoPin");
 
 module top () {
     net left;
@@ -498,7 +611,7 @@ module top () {
 });
 
 test("does not treat package as a primitive footprint", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -517,7 +630,7 @@ module top () {
 });
 
 test("connects chained bridge operators with implicit nets between primitives", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -538,7 +651,7 @@ module top () {
 });
 
 test("rejects bridge middles that are not two-pin components", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net left;
@@ -552,7 +665,7 @@ module top () {
 });
 
 test("creates component arrays and executes for loops", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net signal;
@@ -571,7 +684,7 @@ module top () {
 });
 
 test("strips line comments before compiling statements", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     // The following declaration should still be parsed.
@@ -587,7 +700,7 @@ module top () {
 });
 
 test("instantiates hierarchical modules and connects exported nets", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module child () {
     rail v;
@@ -607,16 +720,66 @@ module top () {
 `, (filePath) => {
         const result = step1(filePath);
 
-        assert.deepEqual([...result.netList].sort(), ["gpio", "power_h", "power_l"].sort());
+        assert.deepEqual([...result.netList].sort(), ["gpio", "power", "power.l"].sort());
         assert.equal(result.components.length, 1);
         assert.equal(result.components[0].pins.IN.net, "gpio");
-        assert.equal(result.components[0].pins.OUT.net, "power_l");
+        assert.equal(result.components[0].pins.OUT.net, "power.l");
         assert.deepEqual(result.components[0].__schrune.modulePath, ["c"]);
     });
 });
 
+test("connects net-like endpoints to the high side of a rail by default", () => {
+    withFixture(`@require("TestPart");
+
+module top () {
+    rail power;
+    net signal;
+    part u = new TestPart();
+    signal ~ power;
+    u.IN ~ power;
+    u.OUT ~ power.l;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        assert.equal(result.nets.signal, "power");
+        assert.equal(result.components[0].pins.IN.net, "power");
+        assert.equal(result.components[0].pins.OUT.net, "power.l");
+    });
+});
+
+test("applies whole-group name overrides to typed nets", () => {
+    withFixture(`@require("TestPart");
+
+module top () {
+    net<i2c> i2c_bus;
+    i2c_bus.name = "sensors";
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        assert.deepEqual([...result.netList].sort(), ["sensors.SCL", "sensors.SDA"].sort());
+        assert.deepEqual(result.nets.i2c_bus, {
+            type: "i2c",
+            SDA: "sensors.SDA",
+            SCL: "sensors.SCL",
+        });
+    });
+});
+
+test("applies component place overrides", () => {
+    withFixture(`@require("TestPart");
+
+module top () {
+    part r = new Resistor(value = "0Ohm");
+    r.place = false;
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        assert.equal(result.components[0].place, false);
+    });
+});
+
 test("allows module-local renamed rails to join a higher-level net", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module child () {
     rail power;
@@ -657,7 +820,7 @@ test("evaluates val declarations in constructor expressions", () => {
 });
 
 test("expands typed net groups across whole-bus and signal connections", () => {
-    withFixture(`#include "TestPart.schrune"
+    withFixture(`@require("TestPart");
 
 module top () {
     net<i2c> bus_1;
@@ -676,5 +839,52 @@ module top () {
         assert.deepEqual(result.nets.bus_2, { type: "i2c", SDA: "bus_2.SDA", SCL: "bus_2.SCL" });
         assert.equal(result.components[0].pins[1].net, "bus_2.SDA");
         assert.equal(result.components[1].pins[1].net, "bus_2.SCL");
+    });
+});
+
+test("passes rail, net, typed net, and val module parameters through with type enforcement", () => {
+    withFixture(`@require("TestPart");
+
+module LED(net GPIO, rail power, val current, net<i2c> bus) {
+    part u = new TestPart();
+    GPIO ~ u.IN;
+    power.l ~ u.OUT;
+    bus.SDA ~ u[1];
+}
+
+module top () {
+    rail power;
+    net gpio1;
+    net<i2c> i2c_bus;
+    val current = 0.5;
+    power.l.name = "GND";
+    mod led = new LED(gpio1, power, current, i2c_bus);
+}
+`, (filePath) => {
+        const result = step1(filePath);
+        assert.equal(result.components.length, 1);
+        assert.equal(result.components[0].pins.IN.net, "gpio1");
+        assert.equal(result.components[0].pins.OUT.net, "GND");
+        assert.equal(result.components[0].pins[1].net, "i2c_bus.SDA");
+    });
+
+    withFixture(`module child(rail power) { }
+
+module top () {
+    net signal;
+    mod c = new child(signal);
+}
+`, (filePath) => {
+        assert.throws(() => step1(filePath), /requires a rail argument/);
+    });
+
+    withFixture(`module child(net<i2c> bus) { }
+
+module top () {
+    rail power;
+    mod c = new child(power);
+}
+`, (filePath) => {
+        assert.throws(() => step1(filePath), /requires net<i2c>/);
     });
 });

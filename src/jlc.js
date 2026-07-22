@@ -76,7 +76,13 @@ function normalizeJlcPart(product) {
         stock: Number(product.stockCount || product.stock || 0),
         unitCost,
         isBasic: boolish(product.is_basic ?? product.isBasic ?? product.componentLibraryType === "base"),
-        isPreferred: boolish(product.is_preferred ?? product.isPreferred ?? product.componentLibraryType === "preferential"),
+        isPreferred: boolish(
+            product.is_preferred
+            ?? product.isPreferred
+            ?? product.preferredComponentFlag
+            ?? product.preferredPart
+            ?? product.componentLibraryType === "preferential"
+        ),
         prices,
         attributes,
     };

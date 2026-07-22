@@ -96,6 +96,79 @@ const footprintFile = `(footprint "TestPart" (version 20221018) (generator Schru
 )
 `;
 
+const verticalPinSymbolFile = `(kicad_symbol_lib (version 20211014) (generator Schrune)
+  (symbol "VerticalPart" (pin_names (offset 1.016)) (in_bom yes) (on_board yes)
+    (property "Reference" "J?" (at 0 5.08 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "VerticalPart" (at 0 -5.08 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "./VerticalPart.kicad_mod" (at 0 -7.62 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "Datasheet" "" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (symbol "VerticalPart_0_1"
+      (rectangle (start -3.81 5.08) (end 3.81 0)
+        (stroke (width 0.254) (type default))
+        (fill (type background))
+      )
+      (pin passive line (at -1.27 -5.08 90) (length 5.08)
+        (name "1" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line (at 1.27 -5.08 90) (length 5.08)
+        (name "2" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+)
+`;
+
+const verticalPinFootprintFile = `(footprint "VerticalPart" (version 20221018) (generator Schrune)
+  (attr through_hole)
+  (fp_text reference "REF**" (at 0 -2 0) (layer "F.SilkS")
+    (effects (font (size 1 1) (thickness 0.15)))
+  )
+  (fp_text value "VerticalPart" (at 0 2 0) (layer "F.Fab")
+    (effects (font (size 1 1) (thickness 0.15)))
+  )
+  (pad "1" thru_hole circle (at -2.5 0 0) (size 1 1) (drill 0.5) (layers "*.Cu" "*.Mask"))
+  (pad "2" thru_hole circle (at 2.5 0 0) (size 1 1) (drill 0.5) (layers "*.Cu" "*.Mask"))
+)
+`;
+
+const reversedPinOrderSymbolFile = `(kicad_symbol_lib (version 20211014) (generator Schrune)
+  (symbol "ReversedPinPart" (pin_names (offset 1.016)) (in_bom yes) (on_board yes)
+    (property "Reference" "U?" (at 0 5.08 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Value" "ReversedPinPart" (at 0 -5.08 0)
+      (effects (font (size 1.27 1.27)))
+    )
+    (property "Footprint" "./ReversedPinPart.kicad_mod" (at 0 -7.62 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (property "Datasheet" "" (at 0 0 0)
+      (effects (font (size 1.27 1.27)) hide)
+    )
+    (symbol "ReversedPinPart_0_1"
+      (pin passive line (at -7.62 0 0) (length 2.54)
+        (name "RIGHT_NET" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line (at 7.62 0 180) (length 2.54)
+        (name "LEFT_NET" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+)
+`;
+
 function makeFixture(options = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "schrune-kicad-"));
     const partsDir = path.join(dir, "parts", "TestPart");
@@ -106,7 +179,7 @@ function makeFixture(options = {}) {
         fs.writeFileSync(path.join(partsDir, "TestPart.kicad_mod"), footprintFile);
     }
     const filePath = path.join(dir, "fixture.schrune");
-    fs.writeFileSync(filePath, options.source || `#include "TestPart.schrune"
+    fs.writeFileSync(filePath, options.source || `@require("TestPart");
 
 module top () {
     rail power;
@@ -129,6 +202,7 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.equal(fs.existsSync(result.kicadProjectPath), true);
         assert.equal(fs.existsSync(result.schematicPath), true);
         assert.equal(fs.existsSync(result.pcbPath), true);
+        assert.equal(path.basename(result.kicadDir), "build");
         assert.equal(fs.existsSync(path.join(result.kicadDir, "fp-lib-table")), true);
         assert.equal(fs.existsSync(result.footprintLibraryPath), true);
         assert.equal(fs.existsSync(path.join(result.footprintLibraryPath, "TestPart.kicad_mod")), true);
@@ -159,6 +233,10 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.match(schematic, /\(sheet_instances/);
         assert.match(schematic, /\(label "signal"/);
         assert.match(schematic, /\(label "GND"/);
+        assert.match(schematic, /\(wire \(pts \(xy 68\.58 100\.33\) \(xy 60\.96 100\.33\)\)/);
+        assert.match(schematic, /\(label "signal" \(at 60\.96 100\.33 180\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 83\.82 102\.87\) \(xy 91\.44 102\.87\)\)/);
+        assert.match(schematic, /\(label "GND" \(at 91\.44 102\.87 0\)/);
         assert.doesNotMatch(schematic, /power:/);
 
         const pcb = fs.readFileSync(result.pcbPath, "utf8");
@@ -170,6 +248,200 @@ test("writes KiCad project, schematic, and PCB files", () => {
         assert.match(pcb, /\(net \d+ "signal"\)/);
         assert.doesNotMatch(pcb, /\(at [^)]*\(net /);
         assert.doesNotMatch(pcb, /\(fill \(type none\)\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("can create an empty PCB without populating layout", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled, { updateLayout: false });
+
+        assert.equal(fs.existsSync(result.kicadProjectPath), true);
+        assert.equal(fs.existsSync(result.schematicPath), true);
+        assert.equal(fs.existsSync(result.pcbPath), true);
+
+        const project = fs.readFileSync(result.kicadProjectPath, "utf8");
+        const schematic = fs.readFileSync(result.schematicPath, "utf8");
+        const pcb = fs.readFileSync(result.pcbPath, "utf8");
+
+        assert.match(project, /"boards": \[\s*\{\s*"filename": "fixture\.kicad_pcb"/s);
+        assert.match(project, /"top_level_sheets": \[\s*\{\s*"filename": "fixture\.kicad_sch"/s);
+        assert.match(schematic, /\(symbol \(lib_id "TestPart"/);
+        assert.match(pcb, /\(kicad_pcb \(version 20260206\) \(generator "Schrune"\) \(generator_version "10\.0"\)/);
+        assert.match(pcb, /\(net 0 ""\)/);
+        assert.doesNotMatch(pcb, /\(net \d+ "GND"\)/);
+        assert.doesNotMatch(pcb, /\(footprint /);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("leaves an existing PCB untouched when layout updates are disabled", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const initialResult = writeKiCadFiles(fixture.filePath, compiled);
+        const seededPcb = `${fs.readFileSync(initialResult.pcbPath, "utf8")}\n; keep this exact sentinel\n`;
+        fs.writeFileSync(initialResult.pcbPath, seededPcb);
+
+        const updatedResult = writeKiCadFiles(fixture.filePath, compiled, { updateLayout: false });
+        const updatedPcb = fs.readFileSync(updatedResult.pcbPath, "utf8");
+
+        assert.equal(updatedPcb, seededPcb);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("refreshes the footprint library when layout updates are disabled", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const initialResult = writeKiCadFiles(fixture.filePath, compiled);
+        const seededPcb = `${fs.readFileSync(initialResult.pcbPath, "utf8")}\n; keep this exact sentinel\n`;
+        fs.writeFileSync(initialResult.pcbPath, seededPcb);
+
+        const footprintPath = path.join(fixture.dir, "parts", "TestPart", "TestPart.kicad_mod");
+        fs.writeFileSync(footprintPath, footprintFile.replace(/\(attr smd\)/, "(attr smd)\n  (descr \"updated footprint\")"));
+
+        const updatedResult = writeKiCadFiles(fixture.filePath, compiled, { updateLayout: false });
+        const updatedPcb = fs.readFileSync(updatedResult.pcbPath, "utf8");
+        const libraryFootprint = fs.readFileSync(path.join(updatedResult.footprintLibraryPath, "TestPart.kicad_mod"), "utf8");
+
+        assert.equal(updatedPcb, seededPcb);
+        assert.match(libraryFootprint, /\(descr "updated footprint"\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("connects imported vertical pins at their electrical endpoints and rotates labels", () => {
+    const fixture = makeFixture({
+        partFile: `part VerticalPart {
+    info: {
+        partNumber: "VerticalPart",
+        manufacture: "TestCo",
+        footprint: "./VerticalPart.kicad_mod",
+        symbol: "./VerticalPart.kicad_sym",
+        designatorPrefix: "J",
+    }
+
+    pins: [
+        1:1,
+        2:2,
+    ]
+}
+`,
+        source: `@require("VerticalPart");
+
+module top () {
+    net left;
+    net right;
+    part j = new VerticalPart();
+    j[1] ~ left;
+    j[2] ~ right;
+}
+`,
+    });
+
+    try {
+        const partsDir = path.join(fixture.dir, "parts", "VerticalPart");
+        fs.mkdirSync(partsDir, { recursive: true });
+        fs.writeFileSync(path.join(partsDir, "VerticalPart.schrune"), `part VerticalPart {
+    info: {
+        partNumber: "VerticalPart",
+        manufacture: "TestCo",
+        footprint: "./VerticalPart.kicad_mod",
+        symbol: "./VerticalPart.kicad_sym",
+        designatorPrefix: "J",
+    }
+
+    pins: [
+        1:1,
+        2:2,
+    ]
+}
+`);
+        fs.writeFileSync(path.join(partsDir, "VerticalPart.kicad_sym"), verticalPinSymbolFile);
+        fs.writeFileSync(path.join(partsDir, "VerticalPart.kicad_mod"), verticalPinFootprintFile);
+
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled);
+        const schematic = fs.readFileSync(result.schematicPath, "utf8");
+
+        assert.match(schematic, /\(wire \(pts \(xy 74\.93 106\.68\) \(xy 74\.93 114\.30\)\)/);
+        assert.match(schematic, /\(label "left" \(at 74\.93 114\.30 90\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 77\.47 106\.68\) \(xy 77\.47 116\.84\)\)/);
+        assert.match(schematic, /\(label "right" \(at 77\.47 116\.84 90\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("preserves library pin declaration order in schematic instances", () => {
+    const fixture = makeFixture({
+        partFile: `part ReversedPinPart {
+    info: {
+        partNumber: "ReversedPinPart",
+        manufacture: "TestCo",
+        footprint: "./ReversedPinPart.kicad_mod",
+        symbol: "./ReversedPinPart.kicad_sym",
+        designatorPrefix: "U",
+    }
+
+    pins: [
+        LEFT_NET:1,
+        RIGHT_NET:2,
+    ]
+}
+`,
+        source: `@require("ReversedPinPart");
+
+module top () {
+    net left;
+    net right;
+    part u = new ReversedPinPart();
+    u.LEFT_NET ~ left;
+    u.RIGHT_NET ~ right;
+}
+`,
+    });
+
+    try {
+        const partsDir = path.join(fixture.dir, "parts", "ReversedPinPart");
+        fs.mkdirSync(partsDir, { recursive: true });
+        fs.writeFileSync(path.join(partsDir, "ReversedPinPart.schrune"), `part ReversedPinPart {
+    info: {
+        partNumber: "ReversedPinPart",
+        manufacture: "TestCo",
+        footprint: "./ReversedPinPart.kicad_mod",
+        symbol: "./ReversedPinPart.kicad_sym",
+        designatorPrefix: "U",
+    }
+
+    pins: [
+        LEFT_NET:1,
+        RIGHT_NET:2,
+    ]
+}
+`);
+        fs.writeFileSync(path.join(partsDir, "ReversedPinPart.kicad_sym"), reversedPinOrderSymbolFile);
+        fs.writeFileSync(path.join(partsDir, "ReversedPinPart.kicad_mod"), footprintFile.replace(/TestPart/g, "ReversedPinPart"));
+
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled);
+        const schematic = fs.readFileSync(result.schematicPath, "utf8");
+        const instanceBlock = schematic.match(/\(symbol \(lib_id "ReversedPinPart"\)[\s\S]*?\n  \)/);
+
+        assert.ok(instanceBlock);
+        assert.match(instanceBlock[0], /\(pin "2"[\s\S]*?\(pin "1"/);
+        assert.match(schematic, /\(wire \(pts \(xy 68\.58 101\.60\) \(xy 60\.96 101\.60\)\)/);
+        assert.match(schematic, /\(label "right" \(at 60\.96 101\.60 180\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 83\.82 101\.60\) \(xy 91\.44 101\.60\)\)/);
+        assert.match(schematic, /\(label "left" \(at 91\.44 101\.60 0\)/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
@@ -195,7 +467,7 @@ test("handles rail pin groups without recursing forever", () => {
     ]
 }
 `,
-        source: `#include "TestPart.schrune"
+        source: `@require("TestPart");
 
 module top () {
     rail power;
@@ -223,7 +495,7 @@ test("loads compact KiCad symbol libraries across format variations", () => {
     fs.writeFileSync(path.join(partsDir, "TestPart.kicad_sym"), compactSymbolFile);
     fs.writeFileSync(path.join(partsDir, "TestPart.kicad_mod"), footprintFile);
     const filePath = path.join(dir, "fixture.schrune");
-    fs.writeFileSync(filePath, `#include "TestPart.schrune"
+    fs.writeFileSync(filePath, `@require("TestPart");
 
 module top () {
     part u = new TestPart();
@@ -240,10 +512,29 @@ module top () {
     }
 });
 
+test("uses an explicit project name for generated KiCad filenames", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled, { projectName: "DemoBoard" });
+        const schematic = fs.readFileSync(result.schematicPath, "utf8");
+        const pcb = fs.readFileSync(result.pcbPath, "utf8");
+
+        assert.equal(path.basename(result.kicadProjectPath), "DemoBoard.kicad_pro");
+        assert.equal(path.basename(result.schematicPath), "DemoBoard.kicad_sch");
+        assert.equal(path.basename(result.pcbPath), "DemoBoard.kicad_pcb");
+        assert.match(schematic, /\(project "DemoBoard"/);
+        assert.doesNotMatch(schematic, /\(project "fixture"/);
+        assert.match(pcb, /\(uuid [0-9a-f-]+\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("uses net labels for rail nets instead of power symbols", () => {
     const fixture = makeFixture();
     try {
-        fs.writeFileSync(fixture.filePath, `#include "TestPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("TestPart");
 
 module top () {
     rail power;
@@ -266,6 +557,77 @@ module top () {
     }
 });
 
+test("spaces grouped passive pairs far enough to avoid overlapping connection stubs", () => {
+    const fixture = makeFixture({
+        partFile: `part TestPart {
+    info: {
+        partNumber: "TestPart",
+        manufacture: "TestCo",
+        footprint: "./TestPart.kicad_mod",
+        symbol: "./TestPart.kicad_sym",
+        designatorPrefix: "R",
+    }
+
+    pins: [
+        IN:1,
+        GND:2,
+    ]
+}
+`,
+        source: `@require("TestPart");
+
+module top () {
+    rail power;
+    power.h.name = "3V3";
+    power.l.name = "GND";
+    part u1 = new TestPart();
+    part u2 = new TestPart();
+    u1.IN ~ power.h;
+    u1.GND ~ power.l;
+    u2.IN ~ power.h;
+    u2.GND ~ power.l;
+}
+`,
+    });
+
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled);
+        const schematic = fs.readFileSync(result.schematicPath, "utf8");
+
+        assert.match(schematic, /\(symbol \(lib_id "TestPart"\) \(at 76\.20 101\.60 0\)/);
+        assert.match(schematic, /\(symbol \(lib_id "TestPart"\) \(at 152\.40 101\.60 0\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 83\.82 102\.87\) \(xy 91\.44 102\.87\)\)/);
+        assert.match(schematic, /\(wire \(pts \(xy 144\.78 100\.33\) \(xy 137\.16 100\.33\)\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("marks do-not-place components in schematic and PCB output", () => {
+    const fixture = makeFixture({
+        source: `@require("TestPart");
+
+module top () {
+    part u = new TestPart();
+    u.place = false;
+}
+`,
+    });
+
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const result = writeKiCadFiles(fixture.filePath, compiled);
+        const schematic = fs.readFileSync(result.schematicPath, "utf8");
+        const pcb = fs.readFileSync(result.pcbPath, "utf8");
+
+        assert.match(schematic, /\(in_bom no\) \(on_board yes\) \(dnp yes\)/);
+        assert.match(pcb, /\(attr dnp\)/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
 test("embeds downloaded footprint geometry without synthetic repair", () => {
     const fixture = makeFixture();
     try {
@@ -282,7 +644,7 @@ test("embeds downloaded footprint geometry without synthetic repair", () => {
             .replace(/\n\)/, "\n  (fp_arc (start -9.98 -0.00) (end -9.95 1.00) (angle -180.00) (layer F.SilkS) (width 0.25))\n)")
             .replace(/\(fp_text reference[\s\S]*?\n  \)/, "")
             .replace(/\(fp_text value[\s\S]*?\n  \)/, ""));
-        fs.writeFileSync(fixture.filePath, `#include "HeaderPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("HeaderPart");
 
 module top () {
     net left;
@@ -322,7 +684,7 @@ test("throws a build error when a KiCad asset is missing", () => {
 test("writes module components on separate schematic sheets", () => {
     const fixture = makeFixture();
     try {
-        fs.writeFileSync(fixture.filePath, `#include "TestPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("TestPart");
 
 module child () {
     rail power;
@@ -350,8 +712,10 @@ module top () {
 
         const childSchematic = fs.readFileSync(result.moduleSchematicPaths.c, "utf8");
         assert.match(childSchematic, /\(symbol \(lib_id "TestPart"\)/);
-        assert.match(childSchematic, /\(global_label "board_power_h"/);
-        assert.match(childSchematic, /\(global_label "board_power_l"/);
+        assert.match(childSchematic, /\(global_label "board_power"/);
+        assert.match(childSchematic, /\(global_label "board_power\.l"/);
+        assert.match(childSchematic, /\(global_label "board_power"[\s\S]*?\(effects \(font \(size 1\.27 1\.27\)\)\)/);
+        assert.match(childSchematic, /\(global_label "board_power\.l"[\s\S]*?\(effects \(font \(size 1\.27 1\.27\)\)\)/);
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }
@@ -388,7 +752,7 @@ test("refreshes an existing PCB while preserving placement and board items", () 
             fs.writeFileSync(path.join(dir, `${name}.kicad_mod`), footprintFile.replace(/TestPart/g, name));
         }
 
-        fs.writeFileSync(fixture.filePath, `#include "TestPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("TestPart");
 
 module top () {
     rail power;
@@ -414,15 +778,19 @@ module top () {
             `    (net ${initialGndNet})`,
             `  )`,
         ].join("\n");
-        const movedPcb = initialPcb.replace(/\n(\s*)\(at\s+[^)]+\)/, "\n$1(at 99.00 88.00 45)");
+        const movedPcb = initialPcb
+            .replace(/\n(\s*)\(at\s+[^)]+\)/, "\n$1(at 99.00 88.00 45)")
+            .replace(/\n\s+\(property "Value" "TestPart"\)/, '\n    (property "Value" "TestPart")\n    (property "Custom" "keep-me")')
+            .replace(/\(fp_text reference "U1" \(at 0 -2 0\) \(layer "F\.SilkS"\)/, '(fp_text reference "U1" (at 4.50 -6.25 90) (layer "B.SilkS"))')
+            .replace(/\(fp_text value "TestPart" \(at 0 2 0\) \(layer "F\.Fab"\)/, '(fp_text value "TestPart" (at -3.00 7.50 180) (layer "F.Fab"))');
         const closingIndex = movedPcb.lastIndexOf("\n)");
         const seededPcb = closingIndex === -1
             ? `${movedPcb}\n${segmentBlock}\n`
             : `${movedPcb.slice(0, closingIndex)}\n${segmentBlock}${movedPcb.slice(closingIndex)}`;
         fs.writeFileSync(initialResult.pcbPath, seededPcb);
 
-        fs.writeFileSync(fixture.filePath, `#include "EarlierPart.schrune"
-#include "TestPart.schrune"
+        fs.writeFileSync(fixture.filePath, `@require("EarlierPart");
+@require("TestPart");
 
 module top () {
     rail power;
@@ -446,11 +814,56 @@ module top () {
         assert.notEqual(updatedPcb, seededPcb);
         assert.match(updatedPcb, /\(footprint "Schrune:EarlierPart"/);
         assert.match(updatedPcb, /\(footprint "Schrune:TestPart"[\s\S]*?\(at 99\.00 88\.00 45\)/);
+        assert.match(updatedPcb, /\(footprint "Schrune:TestPart"[\s\S]*?\(property "Custom" "keep-me"\)/);
+        assert.match(updatedPcb, /\(footprint "Schrune:TestPart"[\s\S]*?\(fp_text reference "U1" \(at 4\.50 -6\.25 90\) \(layer "B\.SilkS"\)/);
+        assert.match(updatedPcb, /\(footprint "Schrune:TestPart"[\s\S]*?\(fp_text value "TestPart" \(at -3\.00 7\.50 180\) \(layer "F\.Fab"\)/);
         assert.match(updatedPcb, new RegExp(`\\(segment[\\s\\S]*?\\(net ${updatedGndNet}\\)`));
         assert.match(updatedSchematic, /\(symbol \(lib_id "EarlierPart"[\s\S]*?\(property "Reference" "U2"/);
         assert.match(updatedSchematic, /\(symbol \(lib_id "TestPart"[\s\S]*?\(property "Reference" "U1"/);
         assert.match(updatedSchematic, /\(property "Value" "EarlierPart"/);
         assert.match(updatedSchematic, /\(property "Value" "TestPart"/);
+    } finally {
+        fs.rmSync(fixture.dir, { recursive: true, force: true });
+    }
+});
+
+test("refreshes an existing KiCad project while preserving board setup and net classes", () => {
+    const fixture = makeFixture();
+    try {
+        const compiled = assignDesignators(step1(fixture.filePath));
+        const initialResult = writeKiCadFiles(fixture.filePath, compiled);
+        const seededProject = JSON.parse(fs.readFileSync(initialResult.kicadProjectPath, "utf8"));
+        seededProject.board = {
+            design_settings: {
+                defaults: {
+                    track_width: 0.42,
+                },
+            },
+            custom_rule: "keep-board-setup",
+        };
+        seededProject.net_settings = {
+            classes: [{
+                name: "HV",
+                track_width: 0.8,
+                clearance: 0.3,
+            }],
+        };
+        seededProject.schematic.page_layout_descr_file = "custom-layout.kicad_wks";
+        fs.writeFileSync(initialResult.kicadProjectPath, `${JSON.stringify(seededProject, null, 2)}\n`);
+
+        const updatedResult = writeKiCadFiles(fixture.filePath, compiled);
+        const updatedProject = JSON.parse(fs.readFileSync(updatedResult.kicadProjectPath, "utf8"));
+
+        assert.equal(updatedProject.board.custom_rule, "keep-board-setup");
+        assert.equal(updatedProject.board.design_settings.defaults.track_width, 0.42);
+        assert.deepEqual(updatedProject.net_settings.classes, [{
+            name: "HV",
+            track_width: 0.8,
+            clearance: 0.3,
+        }]);
+        assert.equal(updatedProject.schematic.page_layout_descr_file, "custom-layout.kicad_wks");
+        assert.equal(updatedProject.boards[0].filename, "fixture.kicad_pcb");
+        assert.equal(updatedProject.schematic.top_level_sheets[0].filename, "fixture.kicad_sch");
     } finally {
         fs.rmSync(fixture.dir, { recursive: true, force: true });
     }

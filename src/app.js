@@ -3,9 +3,22 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const readline = require("readline/promises");
+const { spawn } = require("child_process");
 const { addLcscPart } = require("./lcsc");
-const { assignDesignators, buildDesignatorState, readDesignatorState, step3, writeDesignatorState } = require("./bom");
+const { assignDesignators, buildDesignatorState, readDesignatorState, readPartsLock, step3, writeDesignatorState } = require("./bom");
 const { writeKiCadFiles } = require("./kicad");
+const { buildJlcBom, renderJlcBomReport } = require("./jlc-bom");
+const {
+    PROJECT_FILE,
+    addPartToProjectConfig,
+    findProjectConfig,
+    findProjectConfigInDirectory,
+    manifestBuildRecord,
+    relativeManifestPath,
+    resolveBuildTarget,
+    writeProjectConfig,
+} = require("./project");
 
 const ANSI = {
     reset: "\x1b[0m",
@@ -153,6 +166,9 @@ function formatError(error, stream = process.stderr) {
             const caretColumn = Math.max(1, error.column || 1);
             lines.push(colorize(`  ${" ".repeat(caretColumn - 1)}^`, "red", stream));
         }
+        if (error.statement && error.statement !== error.sourceLine) {
+            lines.push(colorize(`  while compiling: ${error.statement.trimEnd()}`, "gray", stream));
+        }
     }
 
     if (error.stack) {
@@ -226,7 +242,7 @@ function extractBlocks(source, keyword, options = {}) {
     return blocks;
 }
 
-function splitStatements(body) {
+function splitStatementsWithLocations(body, baseIndex = 0) {
     const statements = [];
     let start = 0;
     let depth = 0;
@@ -255,20 +271,32 @@ function splitStatements(body) {
         } else if (char === ")" || char === "]" || char === "}") {
             depth--;
         } else if ((char === ";" || char === "\n") && depth === 0) {
-            const statement = body.slice(start, i).trim();
+            const rawStatement = body.slice(start, i);
+            const statement = rawStatement.trim();
             if (statement && (char === ";" || isCompleteLineStatement(statement))) {
-                statements.push(statement);
+                statements.push({
+                    statement,
+                    startIndex: baseIndex + start + (rawStatement.search(/\S/) >= 0 ? rawStatement.search(/\S/) : 0),
+                });
                 start = i + 1;
             }
         }
     }
 
-    const tail = body.slice(start).trim();
+    const rawTail = body.slice(start);
+    const tail = rawTail.trim();
     if (tail) {
-        statements.push(tail);
+        statements.push({
+            statement: tail,
+            startIndex: baseIndex + start + (rawTail.search(/\S/) >= 0 ? rawTail.search(/\S/) : 0),
+        });
     }
 
     return statements;
+}
+
+function splitStatements(body) {
+    return splitStatementsWithLocations(body).map((entry) => entry.statement);
 }
 
 function isCompleteLineStatement(statement) {
@@ -277,6 +305,7 @@ function isCompleteLineStatement(statement) {
         /^val\s+[A-Za-z_]\w*\s*=\s*.+$/,
         /^.+?\.name\s*=\s*.+$/,
         /^[A-Za-z_]\w*\.voltage\s*=\s*.+$/,
+        /^[A-Za-z_]\w*\.place\s*=\s*(?:true|false)$/,
         /^(?:part\s+)?[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*\s*\([\s\S]*\)$/,
         /^(?:part\s+)?[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*$/,
         /^part\[\d+\]\s+[A-Za-z_]\w*\s*=\s*new\s+[A-Za-z_]\w*\s*\([\s\S]*\)$/,
@@ -638,9 +667,7 @@ function parseModules(source, filePath) {
         module.name,
         {
             name: module.name,
-            parameters: module.parameters
-                ? module.parameters.split(",").map((parameter) => parameter.trim()).filter(Boolean)
-                : [],
+            parameters: parseModuleParameters(module.parameters),
             body: module.body,
             filePath,
             source,
@@ -650,39 +677,104 @@ function parseModules(source, filePath) {
     ]));
 }
 
-function includedFiles(filePath, loaded = new Set()) {
+function parseRequireStatements(source, filePath) {
+    const statements = [];
+    const matchedRanges = [];
+    const moduleSelector = String.raw`(?:[A-Za-z_]\w*|\{[ \t]*[A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*[ \t]*\})`;
+    const pattern = new RegExp(
+        String.raw`^[ \t]*@require\([ \t]*(?:(["'])([A-Za-z_]\w*)\1|(${moduleSelector})[ \t]+from[ \t]+(["'])([^"']+)\4)[ \t]*\)[ \t]*;[ \t]*$`,
+        "gm"
+    );
+    let match;
+
+    while ((match = pattern.exec(source)) !== null) {
+        if (match[2]) {
+            statements.push({ kind: "part", name: match[2], index: match.index });
+        } else {
+            const names = match[3].startsWith("{")
+                ? match[3].slice(1, -1).split(",").map((name) => name.trim())
+                : [match[3]];
+            statements.push({ kind: "module", names, path: match[5], index: match.index });
+        }
+        matchedRanges.push([match.index, pattern.lastIndex]);
+    }
+
+    let unmatchedSource = source;
+    for (const [start, end] of matchedRanges.reverse()) {
+        unmatchedSource = `${unmatchedSource.slice(0, start)}${" ".repeat(end - start)}${unmatchedSource.slice(end)}`;
+    }
+    const invalid = unmatchedSource.match(/@require\b/);
+    if (invalid) {
+        throw attachSourceLocation(new Error("Invalid @require() syntax"), filePath, source, invalid.index);
+    }
+
+    return statements;
+}
+
+function resolveRequirement(requirement, requiringFile, projectRoot) {
+    if (requirement.kind === "part") {
+        return path.join(projectRoot, "parts", requirement.name, `${requirement.name}.schrune`);
+    }
+
+    if (path.extname(requirement.path).toLowerCase() !== ".schrune") {
+        throw attachSourceLocation(
+            new Error(`Required module path must be a .schrune file: "${requirement.path}"`),
+            requiringFile,
+            fs.readFileSync(requiringFile, "utf8"),
+            requirement.index
+        );
+    }
+
+    return requirement.path.startsWith("/") || requirement.path.startsWith("\\")
+        ? path.resolve(projectRoot, requirement.path.replace(/^[\\/]+/, ""))
+        : path.resolve(path.dirname(requiringFile), requirement.path);
+}
+
+function requirementDescription(requirement) {
+    return requirement.kind === "part"
+        ? `part "${requirement.name}"`
+        : `module${requirement.names.length === 1 ? "" : "s"} "${requirement.names.join(", ")}"`;
+}
+
+function requiredFiles(filePath, loaded = new Set(), projectRoot = path.dirname(path.resolve(filePath))) {
     const resolvedPath = path.resolve(filePath);
     if (loaded.has(resolvedPath)) {
         return [];
     }
 
     loaded.add(resolvedPath);
-    const baseDir = path.dirname(resolvedPath);
     const rawSource = fs.readFileSync(resolvedPath, "utf8");
     const source = stripComments(rawSource);
-    const includePattern = /^\s*#include\s+["']([^"']+)["']/gm;
     const files = [];
-    let match;
 
-    while ((match = includePattern.exec(source)) !== null) {
-        const includePath = findInclude(baseDir, match[1]);
-        files.push(includePath, ...includedFiles(includePath, loaded));
+    for (const requirement of parseRequireStatements(source, resolvedPath)) {
+        const requiredPath = resolveRequirement(requirement, resolvedPath, projectRoot);
+        if (!fs.existsSync(requiredPath) || !fs.statSync(requiredPath).isFile()) {
+            throw attachSourceLocation(
+                new Error(`Could not resolve required ${requirementDescription(requirement)} at "${requiredPath}"`),
+                resolvedPath,
+                source,
+                requirement.index
+            );
+        }
+        files.push({ ...requirement, filePath: requiredPath }, ...requiredFiles(requiredPath, loaded, projectRoot));
     }
 
     return files;
 }
 
 function createPrimitiveTemplates() {
-    const names = ["Resistor", "Capacitor", "Diode", "Inductor"];
+    const names = ["Resistor", "Capacitor", "Diode", "Inductor", "TestPoint"];
     const prefixes = {
         Resistor: "R",
         Capacitor: "C",
         Diode: "D",
         Inductor: "L",
+        TestPoint: "TP",
     };
     return new Map(names.map((name) => [name, {
         name,
-        primitive: true,
+        primitive: name !== "TestPoint",
         info: {
             partNumber: name,
             manufacture: "Generic",
@@ -692,14 +784,20 @@ function createPrimitiveTemplates() {
             LCSC: undefined,
             designatorPrefix: prefixes[name],
         },
-        pins: [
-            { name: "0", pad: 0 },
-            { name: "1", pad: 1 },
-        ],
+        pins: name === "TestPoint"
+            ? [{ name: "0", pad: 1 }]
+            : [
+                { name: "0", pad: 0 },
+                { name: "1", pad: 1 },
+            ],
     }]));
 }
 
 function createComponent(template, params = {}) {
+    if (template.name === "TestPoint") {
+        const TestPoint = require("./include/testpoint");
+        return new TestPoint(params);
+    }
     if (template.primitive && !("value" in params) && !("LCSC" in params) && !("lcsc" in params)) {
         throw new Error(`${template.name} requires a value or LCSC part`);
     }
@@ -713,6 +811,7 @@ function createComponent(template, params = {}) {
                     footprint: footprint || template.info.footprint,
                     LCSC: params.LCSC || params.lcsc || template.info.LCSC,
                 };
+                this.place = true;
                 this.pins = [];
                 if (template.primitive) {
                     Object.assign(this, params);
@@ -776,80 +875,72 @@ function addPins(target, pins, indexed = false) {
     }
 }
 
-function findInclude(baseDir, includeName) {
-    const directPath = path.resolve(baseDir, includeName);
-    if (fs.existsSync(directPath)) {
-        return directPath;
-    }
-    const includeFileNames = path.extname(includeName)
-        ? [includeName]
-        : [includeName, `${includeName}.schrune`];
-
-    const matches = [];
-
-    function walk(dir) {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-            const entryPath = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-                walk(entryPath);
-            } else if (entry.isFile() && includeFileNames.includes(entry.name)) {
-                matches.push(entryPath);
-            }
-        }
-    }
-
-    walk(baseDir);
-
-    if (matches.length === 1) {
-        return matches[0];
-    }
-
-    if (matches.length > 1) {
-        throw new Error(`Include "${includeName}" is ambiguous`);
-    }
-
-    throw new Error(`Could not resolve include "${includeName}"`);
-}
-
-function loadFile(filePath, loaded = new Set()) {
+function loadFile(filePath, loaded = new Map(), projectRoot = path.dirname(path.resolve(filePath))) {
     const resolvedPath = path.resolve(filePath);
     if (loaded.has(resolvedPath)) {
-        return { source: "", templates: new Map(), modules: new Map() };
+        return loaded.get(resolvedPath);
     }
 
-    loaded.add(resolvedPath);
-    const baseDir = path.dirname(resolvedPath);
     const rawSource = fs.readFileSync(resolvedPath, "utf8");
     const source = stripComments(rawSource);
     const templates = createPrimitiveTemplates();
     const modules = new Map();
-    const importMatch = source.match(/^\s*#import\b/m);
-    if (importMatch) {
-        throw attachSourceLocation(new Error("Use #include to add files"), resolvedPath, source, importMatch.index);
+    const legacyImport = source.match(/^\s*#(?:include|import)\b/m);
+    if (legacyImport) {
+        throw attachSourceLocation(new Error("Use @require() to load parts and modules"), resolvedPath, source, legacyImport.index);
     }
 
-    const includePattern = /^\s*#include\s+["']([^"']+)["']/gm;
-    let match;
+    const localTemplates = parsePart(source, resolvedPath);
+    const localModules = parseModules(source, resolvedPath);
+    const result = { source, templates, modules, localTemplates, localModules };
+    loaded.set(resolvedPath, result);
 
-    while ((match = includePattern.exec(source)) !== null) {
-        const includePath = findInclude(baseDir, match[1]);
-        const includeFile = loadFile(includePath, loaded);
-        for (const [name, template] of includeFile.templates) {
+    for (const requirement of parseRequireStatements(source, resolvedPath)) {
+        const requiredPath = resolveRequirement(requirement, resolvedPath, projectRoot);
+        if (!fs.existsSync(requiredPath) || !fs.statSync(requiredPath).isFile()) {
+            throw attachSourceLocation(
+                new Error(`Could not resolve required ${requirementDescription(requirement)} at "${requiredPath}"`),
+                resolvedPath,
+                source,
+                requirement.index
+            );
+        }
+        const requiredFile = loadFile(requiredPath, loaded, projectRoot);
+        const requiredNames = requirement.kind === "part" ? [requirement.name] : requirement.names;
+        const requiredLocals = requirement.kind === "part" ? requiredFile.localTemplates : requiredFile.localModules;
+        for (const requiredName of requiredNames) {
+            if (!requiredLocals.has(requiredName)) {
+                throw attachSourceLocation(
+                    new Error(`Required ${requirement.kind} "${requiredName}" does not exist in "${requiredPath}"`),
+                    resolvedPath,
+                    source,
+                    requirement.index
+                );
+            }
+        }
+        const requiredNameSet = new Set(requiredNames);
+        for (const [name, template] of requiredFile.templates) {
+            if (requiredFile.localTemplates.has(name) && (requirement.kind !== "part" || !requiredNameSet.has(name))) {
+                continue;
+            }
             templates.set(name, template);
         }
-        for (const [name, module] of includeFile.modules) {
+        for (const [name, module] of requiredFile.modules) {
+            if (requiredFile.localModules.has(name) && (requirement.kind !== "module" || !requiredNameSet.has(name))) {
+                continue;
+            }
             modules.set(name, module);
         }
     }
 
-    for (const [name, template] of parsePart(source, resolvedPath)) {
+    for (const [name, template] of localTemplates) {
         templates.set(name, template);
     }
-    for (const [name, module] of parseModules(source, resolvedPath)) {
+    for (const [name, module] of localModules) {
         modules.set(name, module);
     }
 
-    return { source, templates, modules };
+    return result;
 }
 
 function uniqueNetName(preferred, used) {
@@ -937,6 +1028,36 @@ function evaluateArgumentList(args, scope, componentsByName) {
         name,
         evaluateValueExpression(expression, scope, componentsByName),
     ]));
+}
+
+function bindModuleArgument(parameter, expression, scope, context) {
+    if (parameter.kind === "val") {
+        return evaluateValueExpression(expression, scope, context.componentsByName);
+    }
+
+    const value = getNetValue(expression, context.nets, context.modulesByName);
+    if (value === undefined) {
+        throw new Error(`Unknown ${parameter.kind} argument "${expression}"`);
+    }
+
+    if (parameter.kind === "rail") {
+        if (!isRailValue(value)) {
+            throw new Error(`Module parameter "${parameter.name}" requires a rail argument`);
+        }
+        return value;
+    }
+
+    if (parameter.type) {
+        if (!isNetGroup(value) || value.type !== parameter.type) {
+            throw new Error(`Module parameter "${parameter.name}" requires net<${parameter.type}>`);
+        }
+        return value;
+    }
+
+    if (!isNetRef(value)) {
+        throw new Error(`Module parameter "${parameter.name}" requires a net argument`);
+    }
+    return value;
 }
 
 function moduleNetBinding(expression, modulesByName) {
@@ -1047,10 +1168,13 @@ function connectNetBindings(left, right, leftExpression, rightExpression, nameOv
 
     if (isNetGroup(left.value) || isNetGroup(right.value)) {
         if (!isNetGroup(left.value) || !isNetGroup(right.value)) {
-            throw new Error(`Connection joins net group and net "${leftExpression} ~ ${rightExpression}"`);
+            const groupExpression = isNetGroup(left.value) ? leftExpression : rightExpression;
+            const signalExpression = isNetGroup(left.value) ? rightExpression : leftExpression;
+            const groupType = isNetGroup(left.value) ? left.value.type : right.value.type;
+            throw new Error(`Cannot connect net<${groupType}> "${groupExpression}" directly to "${signalExpression}". Connect a specific signal instead, for example "${groupExpression}.SDA ~ ${signalExpression}".`);
         }
         if (left.value.type !== right.value.type) {
-            throw new Error(`Connection joins net groups of different types "${left.value.type}" and "${right.value.type}"`);
+            throw new Error(`Cannot connect net<${left.value.type}> to net<${right.value.type}>. Use matching group types on both sides.`);
         }
 
         for (const signalName of netTypeSignals(left.value.type)) {
@@ -1073,7 +1197,7 @@ function connectNetBindings(left, right, leftExpression, rightExpression, nameOv
 
     if (isRailValue(left.value) || isRailValue(right.value)) {
         if (!isRailValue(left.value) || !isRailValue(right.value)) {
-            throw new Error(`Connection joins rail and net "${leftExpression} ~ ${rightExpression}"`);
+            throw new Error(`Cannot connect a rail directly to a net-like endpoint "${leftExpression} ~ ${rightExpression}". Use the rail side explicitly, for example "${leftExpression}.h ~ ${rightExpression}" or "${leftExpression}.l ~ ${rightExpression}".`);
         }
 
         connectNetBindings(
@@ -1110,7 +1234,7 @@ function connectNetBindings(left, right, leftExpression, rightExpression, nameOv
     const rightResolvedName = resolvedName(rightExpression, right);
 
     if (leftNamed && rightNamed) {
-        throw new Error(`Connection joins nets "${leftResolvedName}" and "${rightResolvedName}"`);
+        throw new Error(`Cannot join two already-named nets "${leftResolvedName}" and "${rightResolvedName}". Rename one side or connect them earlier in the chain.`);
     }
 
     if (leftNamed) {
@@ -1329,6 +1453,29 @@ function readEndpoint(expression, componentsByName, nets, scope = {}, modulesByN
 
     const pinKey = getPinKey(expression, scope);
     if (!pinKey) {
+        const componentRef = parseComponentReference(expression, scope);
+        if (componentRef) {
+            const component = getComponentValue(componentsByName, componentRef);
+            if (component) {
+                const pinPaths = collectLeafPinPaths(component.pins);
+                if (pinPaths.length === 1) {
+                    const componentName = componentRefName(componentRef, scope);
+                    const path = pinPaths[0];
+                    const suffix = path.map((part) => /^\d+$/.test(String(part)) ? `[${part}]` : `.${part}`).join("");
+                    return {
+                        type: "pin",
+                        componentRef,
+                        path,
+                        key: `${componentName}${suffix}`,
+                        defaultNetName: `${componentName}_${path.map(String).join("_")}`,
+                        pin: getPinFromPath(component, path),
+                    };
+                }
+                if (pinPaths.length === 2) {
+                    throw new Error(`Component "${expression}" is a bridge part. Use "~>" instead of "~": "${expression}"`);
+                }
+            }
+        }
         throw new Error(`Unknown connection endpoint "${expression}"`);
     }
 
@@ -1360,7 +1507,12 @@ function connectEndpoints(leftExpression, rightExpression, componentsByName, net
     const rightRail = right.type === "net" ? isRailValue(right.value) : isPinRailValue(right.pin);
     if (leftRail || rightRail) {
         if (!leftRail || !rightRail) {
-            throw new Error(`Connection joins rail and net "${leftExpression} ~ ${rightExpression}"`);
+            if (leftRail) {
+                connectEndpoints(`${leftExpression}.h`, rightExpression, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
+            } else {
+                connectEndpoints(leftExpression, `${rightExpression}.h`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
+            }
+            return;
         }
         for (const side of ["h", "l"]) {
             connectEndpoints(`${leftExpression}.${side}`, `${rightExpression}.${side}`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
@@ -1372,12 +1524,17 @@ function connectEndpoints(leftExpression, rightExpression, componentsByName, net
     const rightNetGroup = right.type === "net" ? isNetGroup(right.value) : isPinNetGroupValue(right.pin);
     if (leftNetGroup || rightNetGroup) {
         if (!leftNetGroup || !rightNetGroup) {
-            throw new Error(`Connection joins net group and net "${leftExpression} ~ ${rightExpression}"`);
+            const groupExpression = leftNetGroup ? leftExpression : rightExpression;
+            const signalExpression = leftNetGroup ? rightExpression : leftExpression;
+            const groupType = leftNetGroup
+                ? (left.type === "net" ? left.value.type : left.pin.type)
+                : (right.type === "net" ? right.value.type : right.pin.type);
+            throw new Error(`Cannot connect net<${groupType}> "${groupExpression}" directly to "${signalExpression}". Connect a specific signal instead, for example "${groupExpression}.SDA ~ ${signalExpression}".`);
         }
         const leftType = left.type === "net" ? left.value.type : left.pin.type;
         const rightType = right.type === "net" ? right.value.type : right.pin.type;
         if (leftType !== rightType) {
-            throw new Error(`Connection joins net groups of different types "${leftType}" and "${rightType}"`);
+            throw new Error(`Cannot connect net<${leftType}> to net<${rightType}>. Use matching group types on both sides.`);
         }
         for (const signalName of netTypeSignals(leftType)) {
             connectEndpoints(`${leftExpression}.${signalName}`, `${rightExpression}.${signalName}`, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
@@ -1392,7 +1549,7 @@ function connectEndpoints(leftExpression, rightExpression, componentsByName, net
 
     if (left.type === "pin" && right.type === "net") {
         if (isNetGroup(right.value)) {
-            throw new Error(`Net group "${rightExpression}" must be connected via one of its signals`);
+            throw new Error(`Net group "${rightExpression}" cannot be used as a whole connection target. Use one of its signals, for example "${rightExpression}.SDA".`);
         }
         pinGroups.connectExplicit(left, right.value, netAliases);
         return;
@@ -1400,7 +1557,7 @@ function connectEndpoints(leftExpression, rightExpression, componentsByName, net
 
     if (left.type === "net" && right.type === "pin") {
         if (isNetGroup(left.value)) {
-            throw new Error(`Net group "${leftExpression}" must be connected via one of its signals`);
+            throw new Error(`Net group "${leftExpression}" cannot be used as a whole connection source. Use one of its signals, for example "${leftExpression}.SDA".`);
         }
         pinGroups.connectExplicit(right, left.value, netAliases);
         return;
@@ -1431,7 +1588,7 @@ function validateBridgeComponent(name, componentsByName, scope = {}) {
 function connectBridge(statement, componentsByName, nets, pinGroups, nameOverrides, scope = {}, modulesByName, netAliases) {
     const parts = statement.split("~>").map((part) => part.trim()).filter(Boolean);
     if (parts.length < 3) {
-        throw new Error(`Invalid bridge connection "${statement}"`);
+        throw new Error(`Bridge connections need a component between the arrows. Use "~>" only when a two-pin part sits in the middle, for example "left ~> r1 ~> right". If you meant a normal tie, use "~".`);
     }
 
     const middleComponents = parts.slice(1, -1);
@@ -1478,9 +1635,9 @@ function renderBridgePathSuffix(path) {
     return `[${path}]`;
 }
 
-function executeBlock(body, context, scope = {}) {
-    for (const statement of splitStatements(body)) {
-        executeStatement(statement, context, scope);
+function executeBlock(body, context, scope = {}, baseIndex = 0) {
+    for (const entry of splitStatementsWithLocations(body, baseIndex)) {
+        executeStatement(entry.statement, context, scope, entry);
     }
 }
 
@@ -1507,11 +1664,13 @@ function parseIfStatement(statement) {
     return {
         condition,
         trueBody,
+        trueBodyStart: trueOpen + 1,
         falseBody: statement.slice(falseOpen + 1, falseClose),
+        falseBodyStart: falseOpen + 1,
     };
 }
 
-function executeForStatement(statement, context, scope) {
+function executeForStatement(statement, context, scope, location) {
     const headerOpen = statement.indexOf("(");
     const headerClose = findMatching(statement, headerOpen, "(", ")");
     const header = statement.slice(headerOpen + 1, headerClose);
@@ -1534,7 +1693,7 @@ function executeForStatement(statement, context, scope) {
     };
 
     while (evaluateExpression(parts[1], loopScope, context.componentsByName)) {
-        executeBlock(body, context, loopScope);
+        executeBlock(body, context, loopScope, location.startIndex + bodyOpen + 1);
 
         const incrementMatch = parts[2].match(/^([A-Za-z_]\w*)(\+\+|--)$/);
         if (!incrementMatch) {
@@ -1545,7 +1704,7 @@ function executeForStatement(statement, context, scope) {
     }
 }
 
-function executeStatement(statement, context, scope = {}) {
+function executeStatement(statement, context, scope = {}, location = {}) {
     const {
         templates,
         moduleTemplates,
@@ -1558,146 +1717,166 @@ function executeStatement(statement, context, scope = {}) {
         netAliases,
     } = context;
 
-    const valMatch = statement.match(/^val\s+([A-Za-z_]\w*)\s*=\s*(.+)$/);
-    if (valMatch) {
-        scope[valMatch[1]] = evaluateValueExpression(valMatch[2], scope, componentsByName);
-        return;
-    }
-
-    const arrayPartMatch = statement.match(/^part\[(\d+)\]\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
-    if (arrayPartMatch) {
-        const count = Number(arrayPartMatch[1]);
-        const instanceName = arrayPartMatch[2];
-        const templateName = arrayPartMatch[3];
-        const params = evaluateArgumentList(arrayPartMatch[4], scope, componentsByName);
-        const template = templates.get(templateName);
-        if (!template) {
-            throw new Error(`Unknown part "${templateName}"`);
-        }
-        if (componentsByName.has(instanceName)) {
-            throw new Error(`Duplicate component "${instanceName}"`);
+    try {
+        const valMatch = statement.match(/^val\s+([A-Za-z_]\w*)\s*=\s*(.+)$/);
+        if (valMatch) {
+            scope[valMatch[1]] = evaluateValueExpression(valMatch[2], scope, componentsByName);
+            return;
         }
 
-        const instances = createComponentInstances(template, params, count)
-            .map((component, index) => annotateComponent(component, instanceName, index, scope.__modulePath));
-        componentsByName.set(instanceName, instances);
-        components.push(...instances);
-        return;
-    }
-
-    const partMatch = statement.match(/^(?:part\s+)?([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)(?:\s*\(([\s\S]*)\))?$/);
-    if (partMatch) {
-        const instanceName = partMatch[1];
-        const templateName = partMatch[2];
-        const params = evaluateArgumentList(partMatch[3] || "", scope, componentsByName);
-        const template = templates.get(templateName);
-        if (!template) {
-            throw new Error(`Unknown part "${templateName}"`);
-        }
-        if (componentsByName.has(instanceName)) {
-            throw new Error(`Duplicate component "${instanceName}"`);
-        }
-
-        const component = annotateComponent(createComponent(template, params), instanceName, undefined, scope.__modulePath);
-        componentsByName.set(instanceName, component);
-        components.push(component);
-        return;
-    }
-
-    const moduleMatch = statement.match(/^mod\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
-    if (moduleMatch) {
-        const instanceName = moduleMatch[1];
-        const moduleName = moduleMatch[2];
-        const moduleTemplate = moduleTemplates.get(moduleName);
-        if (!moduleTemplate) {
-            throw new Error(`Unknown module "${moduleName}"`);
-        }
-        if (modulesByName.has(instanceName) || componentsByName.has(instanceName)) {
-            throw new Error(`Duplicate module "${instanceName}"`);
-        }
-
-        const argExpressions = splitTopLevelEntries(moduleMatch[3]);
-        if (argExpressions.length > moduleTemplate.parameters.length) {
-            throw new Error(`Too many arguments for module "${moduleName}"`);
-        }
-        const moduleScope = {};
-        moduleTemplate.parameters.forEach((parameter, index) => {
-            if (index < argExpressions.length) {
-                moduleScope[parameter] = evaluateValueExpression(argExpressions[index], scope, componentsByName);
+        const arrayPartMatch = statement.match(/^part\[(\d+)\]\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
+        if (arrayPartMatch) {
+            const count = Number(arrayPartMatch[1]);
+            const instanceName = arrayPartMatch[2];
+            const templateName = arrayPartMatch[3];
+            const params = evaluateArgumentList(arrayPartMatch[4], scope, componentsByName);
+            const template = templates.get(templateName);
+            if (!template) {
+                throw new Error(`Unknown part "${templateName}"`);
             }
-        });
-        const pathPrefix = `${scope.__pathPrefix || ""}${instanceName}_`;
-        const moduleInstance = compileModule(moduleTemplate, context, {
-            instanceName,
-            pathPrefix,
-            scope: {
-                ...moduleScope,
-                __modulePath: [...(scope.__modulePath || []), instanceName],
-            },
-        });
-        modulesByName.set(instanceName, moduleInstance);
-        return;
-    }
+            if (componentsByName.has(instanceName)) {
+                throw new Error(`Duplicate component "${instanceName}"`);
+            }
 
-    const voltageMatch = statement.match(/^([A-Za-z_]\w*)\.voltage\s*=\s*(.+)$/);
-    if (voltageMatch) {
-        const rail = nets[voltageMatch[1]];
-        if (!rail || typeof rail !== "object") {
-            throw new Error(`Unknown rail "${voltageMatch[1]}"`);
+            const instances = createComponentInstances(template, params, count)
+                .map((component, index) => annotateComponent(component, instanceName, index, scope.__modulePath));
+            componentsByName.set(instanceName, instances);
+            components.push(...instances);
+            return;
         }
-        rail.voltage = parseValue(voltageMatch[2]);
-        return;
-    }
 
-    const nameMatch = statement.match(/^(.+?)\.name\s*=\s*(.+)$/);
-    if (nameMatch) {
-        const endpoint = readEndpoint(nameMatch[1].trim(), componentsByName, nets, scope, modulesByName);
-        if (endpoint && endpoint.type === "pin") {
-            nameOverrides.set(endpoint.key, parseValue(nameMatch[2]));
+        const partMatch = statement.match(/^(?:part\s+)?([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)(?:\s*\(([\s\S]*)\))?$/);
+        if (partMatch) {
+            const instanceName = partMatch[1];
+            const templateName = partMatch[2];
+            const params = evaluateArgumentList(partMatch[3] || "", scope, componentsByName);
+            const template = templates.get(templateName);
+            if (!template) {
+                throw new Error(`Unknown part "${templateName}"`);
+            }
+            if (componentsByName.has(instanceName)) {
+                throw new Error(`Duplicate component "${instanceName}"`);
+            }
+
+            const component = annotateComponent(createComponent(template, params), instanceName, undefined, scope.__modulePath);
+            componentsByName.set(instanceName, component);
+            components.push(component);
+            return;
         }
-        return;
-    }
 
-    if (/^for\s*\(/.test(statement)) {
-        executeForStatement(statement, context, scope);
-        return;
-    }
+        const moduleMatch = statement.match(/^mod\s+([A-Za-z_]\w*)\s*=\s*new\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/);
+        if (moduleMatch) {
+            const instanceName = moduleMatch[1];
+            const moduleName = moduleMatch[2];
+            const moduleTemplate = moduleTemplates.get(moduleName);
+            if (!moduleTemplate) {
+                throw new Error(`Unknown module "${moduleName}"`);
+            }
+            if (modulesByName.has(instanceName) || componentsByName.has(instanceName)) {
+                throw new Error(`Duplicate module "${instanceName}"`);
+            }
 
-    if (/^if\s*\(/.test(statement)) {
-        const parsed = parseIfStatement(statement);
-        executeBlock(
-            evaluateExpression(parsed.condition, scope, componentsByName)
-                ? parsed.trueBody
-                : parsed.falseBody,
-            context,
-            scope
+            const argExpressions = splitTopLevelEntries(moduleMatch[3]);
+            if (argExpressions.length > moduleTemplate.parameters.length) {
+                throw new Error(`Too many arguments for module "${moduleName}"`);
+            }
+            const moduleScope = {};
+            moduleTemplate.parameters.forEach((parameter, index) => {
+                if (index < argExpressions.length) {
+                    moduleScope[parameter.name] = bindModuleArgument(parameter, argExpressions[index], scope, context);
+                }
+            });
+            const pathPrefix = `${scope.__pathPrefix || ""}${instanceName}_`;
+            const moduleInstance = compileModule(moduleTemplate, context, {
+                instanceName,
+                pathPrefix,
+                scope: {
+                    ...moduleScope,
+                    __modulePath: [...(scope.__modulePath || []), instanceName],
+                },
+            });
+            modulesByName.set(instanceName, moduleInstance);
+            return;
+        }
+
+        const voltageMatch = statement.match(/^([A-Za-z_]\w*)\.voltage\s*=\s*(.+)$/);
+        if (voltageMatch) {
+            const rail = nets[voltageMatch[1]];
+            if (!rail || typeof rail !== "object") {
+                throw new Error(`Unknown rail "${voltageMatch[1]}"`);
+            }
+            rail.voltage = parseValue(voltageMatch[2]);
+            return;
+        }
+
+        const placeMatch = statement.match(/^([A-Za-z_]\w*)\.place\s*=\s*(true|false)$/);
+        if (placeMatch) {
+            const component = componentsByName.get(placeMatch[1]);
+            if (!component) {
+                throw new Error(`Unknown component "${placeMatch[1]}"`);
+            }
+            component.place = placeMatch[2] === "true";
+            return;
+        }
+
+        const nameMatch = statement.match(/^(.+?)\.name\s*=\s*(.+)$/);
+        if (nameMatch) {
+            const endpoint = readEndpoint(nameMatch[1].trim(), componentsByName, nets, scope, modulesByName);
+            if (endpoint && endpoint.type === "pin") {
+                nameOverrides.set(endpoint.key, parseValue(nameMatch[2]));
+            }
+            return;
+        }
+
+        if (/^for\s*\(/.test(statement)) {
+            executeForStatement(statement, context, scope, location);
+            return;
+        }
+
+        if (/^if\s*\(/.test(statement)) {
+            const parsed = parseIfStatement(statement);
+            const branch = evaluateExpression(parsed.condition, scope, componentsByName)
+                ? { body: parsed.trueBody, startIndex: location.startIndex + parsed.trueBodyStart }
+                : { body: parsed.falseBody, startIndex: location.startIndex + parsed.falseBodyStart };
+            executeBlock(branch.body, context, scope, branch.startIndex);
+            return;
+        }
+
+        const bridgeMatch = statement.match(/^.+?\s*~>\s*.+$/);
+        if (bridgeMatch) {
+            connectBridge(statement, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
+            return;
+        }
+
+        const inlineNet = parseInlineNetDeclaration(statement);
+        const connectionParts = splitConnectionChain(inlineNet ? `${inlineNet.name} ~ ${inlineNet.rest}` : statement);
+        if (connectionParts) {
+            const anchor = connectionParts[0];
+            for (const endpoint of connectionParts.slice(1)) {
+                connectEndpoints(
+                    anchor,
+                    endpoint,
+                    componentsByName,
+                    nets,
+                    pinGroups,
+                    nameOverrides,
+                    scope,
+                    modulesByName,
+                    netAliases
+                );
+            }
+        }
+    } catch (error) {
+        if (!location || error.filePath) {
+            throw error;
+        }
+        throw attachSourceLocation(
+            error,
+            context.filePath,
+            context.source || context.body || statement,
+            location.startIndex,
+            statement
         );
-        return;
-    }
-
-    const bridgeMatch = statement.match(/^.+?\s*~>\s*.+$/);
-    if (bridgeMatch) {
-        connectBridge(statement, componentsByName, nets, pinGroups, nameOverrides, scope, modulesByName, netAliases);
-        return;
-    }
-
-    const inlineNet = parseInlineNetDeclaration(statement);
-    const connectionParts = splitConnectionChain(inlineNet ? `${inlineNet.name} ~ ${inlineNet.rest}` : statement);
-    if (connectionParts) {
-        const anchor = connectionParts[0];
-        for (const endpoint of connectionParts.slice(1)) {
-            connectEndpoints(
-                anchor,
-                endpoint,
-                componentsByName,
-                nets,
-                pinGroups,
-                nameOverrides,
-                scope,
-                modulesByName,
-                netAliases
-            );
-        }
     }
 }
 
@@ -1843,16 +2022,41 @@ function createNetRef(value, isOverride = false, name = value) {
     };
 }
 
+function parseModuleParameter(parameter) {
+    const trimmed = parameter.trim();
+    const match = trimmed.match(/^(net(?:<([A-Za-z_]\w*)>)?|rail|val)\s+([A-Za-z_]\w*)$/);
+    if (!match) {
+        throw new Error(`Invalid module parameter "${trimmed}"`);
+    }
+
+    const kind = match[1] === "rail" ? "rail" : match[1] === "val" ? "val" : "net";
+    return {
+        kind,
+        type: match[2] ? normalizeNetType(match[2]) : undefined,
+        name: match[3],
+    };
+}
+
+function parseModuleParameters(parameters) {
+    if (!parameters) {
+        return [];
+    }
+
+    return parameters.split(",").map((parameter) => parseModuleParameter(parameter)).filter(Boolean);
+}
+
 function createNetGroup(name, type, signalNames, pathPrefix = "", nameOverrides = new Map()) {
     const group = {
         __netGroup: true,
         type,
     };
+    const groupOverride = nameOverrides.get(name);
 
     for (const signalName of signalNames) {
         const key = `${name}.${signalName}`;
         const overrideName = nameOverrides.get(key);
-        const finalName = overrideName ? `${pathPrefix}${overrideName}` : `${pathPrefix}${name}.${signalName}`;
+        const baseName = groupOverride ? `${groupOverride}.${signalName}` : `${name}.${signalName}`;
+        const finalName = overrideName ? `${pathPrefix}${overrideName}` : `${pathPrefix}${baseName}`;
         const ref = createNetRef(finalName, false, pathPrefix ? key : finalName);
         ref.group = name;
         ref.signal = signalName;
@@ -2025,13 +2229,14 @@ function collectModuleDeclarations(statements, pathPrefix = "") {
             declarations.push({
                 kind,
                 name,
-                defaultHigh: uniqueNetName(`${pathPrefix}${name}_h`, provisionalNames),
-                defaultLow: uniqueNetName(`${pathPrefix}${name}_l`, provisionalNames),
+                defaultHigh: uniqueNetName(`${pathPrefix}${name}`, provisionalNames),
+                defaultLow: uniqueNetName(`${pathPrefix}${name}.l`, provisionalNames),
             });
         }
     }
 
-    for (const statement of statements) {
+    for (const entry of statements) {
+        const statement = typeof entry === "string" ? entry : entry.statement;
         const inlineNet = parseInlineNetDeclaration(statement);
         if (inlineNet) {
             addDeclaration("net", inlineNet.type, inlineNet.name, inlineNet.inlineAnchor);
@@ -2057,7 +2262,7 @@ function collectModuleDeclarations(statements, pathPrefix = "") {
 }
 
 function compileModule(moduleTemplate, context, options = {}) {
-    const statements = splitStatements(moduleTemplate.body);
+    const statements = splitStatementsWithLocations(moduleTemplate.body, moduleTemplate.bodyStart || 0);
     const pathPrefix = options.pathPrefix || "";
     let declarations;
     let nameOverrides;
@@ -2075,9 +2280,19 @@ function compileModule(moduleTemplate, context, options = {}) {
         context.nameOverrides.set(key, value);
         context.nameOverrides.set(`${pathPrefix}${key}`, value);
     }
+    const parameterNetDeclarations = moduleTemplate.parameters
+        .filter((parameter) => parameter.kind === "net" || parameter.kind === "rail")
+        .map((parameter) => ({
+            kind: parameter.kind,
+            type: parameter.type,
+            name: parameter.name,
+            defaultName: parameter.kind === "net" && !parameter.type ? uniqueNetName(`${pathPrefix}${parameter.name}`, new Set()) : undefined,
+            defaultHigh: parameter.kind === "rail" ? uniqueNetName(`${pathPrefix}${parameter.name}`, new Set()) : undefined,
+            defaultLow: parameter.kind === "rail" ? uniqueNetName(`${pathPrefix}${parameter.name}.l`, new Set()) : undefined,
+        }));
     let localNets;
     try {
-        localNets = applyNetNames(declarations, nameOverrides, pathPrefix);
+        localNets = applyNetNames([...parameterNetDeclarations, ...declarations], nameOverrides, pathPrefix);
     } catch (error) {
         throw attachSourceLocation(
             error,
@@ -2093,26 +2308,33 @@ function compileModule(moduleTemplate, context, options = {}) {
         modulesByName: new Map(),
         nets: localNets,
         nameOverrides,
+        filePath: moduleTemplate.filePath,
+        source: moduleTemplate.source || moduleTemplate.body,
+        bodyStart: moduleTemplate.bodyStart || 0,
     };
     const scope = {
         ...(options.scope || {}),
         __pathPrefix: pathPrefix,
     };
+    for (const parameter of moduleTemplate.parameters) {
+        if (!(parameter.name in scope)) {
+            continue;
+        }
+        if (parameter.kind === "net" || parameter.kind === "rail") {
+            localNets[parameter.name] = scope[parameter.name];
+        }
+    }
 
-    for (const statement of statements) {
+    for (const entry of statements) {
         try {
-            executeStatement(statement, localContext, scope);
+            executeStatement(entry.statement, localContext, scope, entry);
         } catch (error) {
-            const statementIndex = moduleTemplate.body.indexOf(statement);
-            const locationIndex = statementIndex >= 0
-                ? moduleTemplate.bodyStart + statementIndex
-                : moduleTemplate.startIndex || 0;
             throw attachSourceLocation(
                 error,
                 moduleTemplate.filePath,
                 moduleTemplate.source || moduleTemplate.body,
-                locationIndex,
-                statement
+                entry.startIndex,
+                entry.statement
             );
         }
     }
@@ -2347,13 +2569,14 @@ function collectTopDeclarations(statements) {
             declarations.push({
                 kind,
                 name,
-                defaultHigh: uniqueNetName(`${name}_h`, provisionalNames),
-                defaultLow: uniqueNetName(`${name}_l`, provisionalNames),
+                defaultHigh: uniqueNetName(name, provisionalNames),
+                defaultLow: uniqueNetName(`${name}.l`, provisionalNames),
             });
         }
     }
 
-    for (const statement of statements) {
+    for (const entry of statements) {
+        const statement = typeof entry === "string" ? entry : entry.statement;
         const inlineNet = parseInlineNetDeclaration(statement);
         if (inlineNet) {
             addDeclaration(inlineNet);
@@ -2555,13 +2778,42 @@ function renderStatements(statements, indent = 4, context = { netNames: new Set(
         ...context,
         moduleNames: context.moduleNames || new Set(),
     };
-    for (const statement of statements) {
-        lines.push(...renderStatement(statement, indent, nextContext));
+    for (const entry of statements) {
+        lines.push(...renderStatement(entry.statement, indent, nextContext, entry));
     }
     return lines;
 }
 
-function renderStatement(statement, indent = 4, context = { netNames: new Set(), railNames: new Set() }) {
+function renderSourceMetadata(location, context) {
+    if (!location || context.filePath === undefined || context.source === undefined) {
+        return undefined;
+    }
+
+    const { line, column, sourceLine } = sourceLocation(context.source, location.startIndex);
+    return `{
+        filePath: ${jsString(context.filePath)},
+        line: ${line},
+        column: ${column},
+        sourceLine: ${jsString(sourceLine)},
+        statement: ${jsString(location.statement)},
+    }`;
+}
+
+function wrapRenderedStatements(lines, location, context, indent) {
+    const meta = renderSourceMetadata(location, context);
+    if (!meta) {
+        return lines;
+    }
+
+    const padding = " ".repeat(indent);
+    return [
+        `${padding}__executeStatement(${meta}, () => {`,
+        ...lines.map((line) => `${" ".repeat(4)}${line}`),
+        `${padding}});`,
+    ];
+}
+
+function renderStatement(statement, indent = 4, context = { netNames: new Set(), railNames: new Set() }, location = undefined) {
     const padding = " ".repeat(indent);
 
     if (parseNetDeclaration(statement)) {
@@ -2606,37 +2858,58 @@ function renderStatement(statement, indent = 4, context = { netNames: new Set(),
         return [`${padding}${voltageMatch[1]}.voltage = ${jsString(parseValue(voltageMatch[2]))};`];
     }
 
+    const placeMatch = statement.match(/^([A-Za-z_]\w*)\.place\s*=\s*(true|false)$/);
+    if (placeMatch) {
+        return [`${padding}${placeMatch[1]}.place = ${placeMatch[2]};`];
+    }
+
     if (/^for\s*\(/.test(statement)) {
         const headerOpen = statement.indexOf("(");
         const headerClose = findMatching(statement, headerOpen, "(", ")");
         const header = statement.slice(headerOpen + 1, headerClose).replace(/^\s*num\b/, "let");
         const bodyOpen = statement.indexOf("{", headerClose);
         const bodyClose = findMatching(statement, bodyOpen, "{", "}");
-        const bodyStatements = splitStatements(statement.slice(bodyOpen + 1, bodyClose));
-        return [
+        const bodyStatements = splitStatementsWithLocations(
+            statement.slice(bodyOpen + 1, bodyClose),
+            location ? location.startIndex + bodyOpen + 1 : 0
+        );
+        return wrapRenderedStatements([
             `${padding}for (${header}) {`,
             ...renderStatements(bodyStatements, indent + 4, context),
             `${padding}}`,
-        ];
+        ], location, context, indent);
     }
 
     if (/^if\s*\(/.test(statement)) {
         const parsed = parseIfStatement(statement);
         const lines = [
             `${padding}if (${parsed.condition}) {`,
-            ...renderStatements(splitStatements(parsed.trueBody), indent + 4, context),
+            ...renderStatements(
+                splitStatementsWithLocations(parsed.trueBody, location ? location.startIndex + parsed.trueBodyStart : 0),
+                indent + 4,
+                context
+            ),
             `${padding}}`,
         ];
         if (parsed.falseBody) {
             lines[lines.length - 1] = `${padding}} else {`;
-            lines.push(...renderStatements(splitStatements(parsed.falseBody), indent + 4, context));
+            lines.push(
+                ...renderStatements(
+                    splitStatementsWithLocations(parsed.falseBody, location ? location.startIndex + parsed.falseBodyStart : 0),
+                    indent + 4,
+                    context
+                )
+            );
             lines.push(`${padding}}`);
         }
-        return lines;
+        return wrapRenderedStatements(lines, location, context, indent);
     }
 
     if (/^.+?\s*~>\s*.+$/.test(statement)) {
         const parts = statement.split("~>").map((part) => part.trim()).filter(Boolean);
+        if (parts.length < 3) {
+            return wrapRenderedStatements([`${padding}throw new Error(${jsString("Bridge connections need a component between the arrows. Use \"~>\" only when a two-pin part sits in the middle, for example \"left ~> r1 ~> right\". If you meant a normal tie, use \"~\".")});`], location, context, indent);
+        }
         const middleComponents = parts.slice(1, -1);
         const lines = [
             `${padding}__connect(${renderEndpoint(parts[0], context)}, ${renderBridgeEndpoint(middleComponents[0], 0)});`,
@@ -2645,19 +2918,19 @@ function renderStatement(statement, indent = 4, context = { netNames: new Set(),
             lines.push(`${padding}__connect(${renderBridgeEndpoint(middleComponents[i], 1)}, ${renderBridgeEndpoint(middleComponents[i + 1], 0)});`);
         }
         lines.push(`${padding}__connect(${renderBridgeEndpoint(middleComponents[middleComponents.length - 1], 1)}, ${renderEndpoint(parts[parts.length - 1], context)});`);
-        return lines;
+        return wrapRenderedStatements(lines, location, context, indent);
     }
 
     const inlineNet = parseInlineNetDeclaration(statement);
     const connectionParts = splitConnectionChain(inlineNet ? `${inlineNet.name} ~ ${inlineNet.rest}` : statement);
     if (connectionParts) {
         const anchor = connectionParts[0];
-        return connectionParts.slice(1).map((endpoint) => (
+        return wrapRenderedStatements(connectionParts.slice(1).map((endpoint) => (
             `${padding}__connect(${renderEndpoint(anchor, context)}, ${renderEndpoint(endpoint, context)});`
-        ));
+        )), location, context, indent);
     }
 
-    return [`${padding}${statement};`];
+    return wrapRenderedStatements([`${padding}${statement};`], location, context, indent);
 }
 
 function renderRuntimeHelpers() {
@@ -2696,6 +2969,30 @@ function renderRuntimeHelpers() {
         `        }\n` +
         `    }\n` +
         `\n` +
+        `    function __attachSourceLocation(error, meta) {\n` +
+        `        if (!error || error.filePath || !meta) {\n` +
+        `            return error;\n` +
+        `        }\n` +
+        `        const wrapped = new Error(error.message);\n` +
+        `        wrapped.name = error.name || "CompileError";\n` +
+        `        wrapped.filePath = meta.filePath;\n` +
+        `        wrapped.line = meta.line;\n` +
+        `        wrapped.column = meta.column;\n` +
+        `        wrapped.sourceLine = meta.sourceLine;\n` +
+        `        wrapped.statement = meta.statement;\n` +
+        `        wrapped.cause = error;\n` +
+        `        wrapped.stack = error.stack;\n` +
+        `        return wrapped;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __executeStatement(meta, fn) {\n` +
+        `        try {\n` +
+        `            return fn();\n` +
+        `        } catch (error) {\n` +
+        `            throw __attachSourceLocation(error, meta);\n` +
+        `        }\n` +
+        `    }\n` +
+        `\n` +
         `    function __netRef(name, value, isOverride = false) {\n` +
         `        return { __netRef: true, name, value, isOverride };\n` +
         `    }\n` +
@@ -2706,14 +3003,16 @@ function renderRuntimeHelpers() {
         `        return ref;\n` +
         `    }\n` +
         `\n` +
-        `    function __declareNetGroup(name, type) {\n` +
+        `    function __declareNetGroup(name, type, baseName = name) {\n` +
         `        const scopedName = __scopeName(name);\n` +
         `        const group = {\n` +
         `            __netGroup: true,\n` +
+        `            name,\n` +
         `            type,\n` +
         `        };\n` +
         `        for (const signalName of netTypeSignals[type]) {\n` +
-        `            group[signalName] = __netRef(scopedName + "." + signalName, scopedName + "." + signalName, false);\n` +
+        `            const scopedSignalName = __scopeName(baseName + "." + signalName);\n` +
+        `            group[signalName] = __netRef(scopedSignalName, scopedSignalName, false);\n` +
         `            group[signalName].group = scopedName;\n` +
         `            group[signalName].signal = signalName;\n` +
         `        }\n` +
@@ -2723,6 +3022,7 @@ function renderRuntimeHelpers() {
         `\n` +
         `    function __declareRail(name, high, low, highOverride = false, lowOverride = false, isTopLevel = false) {\n` +
         `        const rail = {\n` +
+        `            name,\n` +
         `            h: __netRef(isTopLevel ? high : name + ".h", high, highOverride),\n` +
         `            l: __netRef(isTopLevel ? low : name + ".l", low, lowOverride),\n` +
         `            voltage: undefined,\n` +
@@ -2755,11 +3055,72 @@ function renderRuntimeHelpers() {
         `        return values;\n` +
         `    }\n` +
         `\n` +
-        `    function __setNameOverride(endpoint, value) {\n` +
-        `        if (!endpoint || endpoint.type !== "pin") {\n` +
+        `    function __renameNetRef(ref, value) {\n` +
+        `        if (!ref || !ref.__netRef) {\n` +
         `            return;\n` +
         `        }\n` +
-        `        nameOverrides.set(endpoint.key, value);\n` +
+        `        ref.value = value;\n` +
+        `        ref.name = value;\n` +
+        `        ref.isOverride = true;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __bindNetParam(name, value, overrideValue) {\n` +
+        `        if (!value || !value.__netRef) {\n` +
+        `            throw new Error(\`Module parameter "\${name}" requires a net argument\`);\n` +
+        `        }\n` +
+        `        if (overrideValue) {\n` +
+        `            __renameNetRef(value, overrideValue);\n` +
+        `        }\n` +
+        `        return value;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __bindRailParam(name, value, highOverrideValue, lowOverrideValue) {\n` +
+        `        if (!value || value.__netRef || value.__netGroup || !value.h || !value.l) {\n` +
+        `            throw new Error(\`Module parameter "\${name}" requires a rail argument\`);\n` +
+        `        }\n` +
+        `        if (highOverrideValue) {\n` +
+        `            __renameNetRef(value.h, highOverrideValue);\n` +
+        `        }\n` +
+        `        if (lowOverrideValue) {\n` +
+        `            __renameNetRef(value.l, lowOverrideValue);\n` +
+        `        }\n` +
+        `        return value;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __bindNetGroupParam(name, type, value, baseOverrideValue, signalOverrides = {}) {\n` +
+        `        if (!value || !value.__netGroup || value.type !== type) {\n` +
+        `            throw new Error(\`Module parameter "\${name}" requires net<\${type}>\`);\n` +
+        `        }\n` +
+        `        for (const signalName of netTypeSignals[type]) {\n` +
+        `            const overrideValue = signalOverrides[signalName] || (baseOverrideValue ? baseOverrideValue + "." + signalName : "");\n` +
+        `            if (overrideValue) {\n` +
+        `                __renameNetRef(value[signalName], overrideValue);\n` +
+        `            }\n` +
+        `        }\n` +
+        `        return value;\n` +
+        `    }\n` +
+        `\n` +
+        `    function __setNameOverride(endpoint, value) {\n` +
+        `        if (!endpoint) {\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        if (endpoint.type === "pin") {\n` +
+        `            nameOverrides.set(endpoint.key, value);\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        if (endpoint.type !== "net") {\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        const ref = endpoint.ref;\n` +
+        `        if (ref && ref.__netRef) {\n` +
+        `            __renameNetRef(ref, value);\n` +
+        `            return;\n` +
+        `        }\n` +
+        `        if (ref && ref.__netGroup) {\n` +
+        `            for (const signalName of netTypeSignals[ref.type]) {\n` +
+        `                __renameNetRef(ref[signalName], value + "." + signalName);\n` +
+        `            }\n` +
+        `        }\n` +
         `    }\n` +
         `\n` +
         `    function __net(ref) {\n` +
@@ -2852,6 +3213,18 @@ function renderRuntimeHelpers() {
         `    }\n` +
         `\n` +
         `    function __connect(left, right) {\n` +
+        `        for (const endpoint of [left, right]) {\n` +
+        `            if (endpoint.type !== "net" || !endpoint.ref || !endpoint.ref.pins) {\n` +
+        `                continue;\n` +
+        `            }\n` +
+        `            const paths = __leafPinPaths(endpoint.ref.pins);\n` +
+        `            if (paths.length === 1) {\n` +
+        `                const componentName = endpoint.ref.__schrune && endpoint.ref.__schrune.name || endpoint.ref.constructor.name;\n` +
+        `                const path = paths[0];\n` +
+        `                Object.assign(endpoint, __pin(endpoint.ref, path, componentName + "_" + path.map(String).join("_")));\n` +
+        `                delete endpoint.ref;\n` +
+        `            }\n` +
+        `        }\n` +
         `        const resolveAlias = (name) => {\n` +
         `            while (netAliases.has(name)) {\n` +
         `                name = netAliases.get(name);\n` +
@@ -2863,22 +3236,30 @@ function renderRuntimeHelpers() {
         `        const rightRail = right.type === "net" ? (!right.ref.__netRef && !right.ref.__netGroup && right.ref.h && right.ref.l) : Boolean(right.pin && right.pin.__pinRail);\n` +
         `        if (leftRail || rightRail) {\n` +
         `            if (!leftRail || !rightRail) {\n` +
-        `                throw new Error("Connection joins rail and net");\n` +
+        `                if (leftRail) {\n` +
+        `                    __connect(left.type === "net" ? __net(left.ref.h) : { ...left, pin: left.pin.h, key: left.defaultNetName, defaultNetName: left.defaultNetName }, right);\n` +
+        `                } else {\n` +
+        `                    __connect(left, right.type === "net" ? __net(right.ref.h) : { ...right, pin: right.pin.h, key: right.defaultNetName, defaultNetName: right.defaultNetName });\n` +
+        `                }\n` +
+        `                return;\n` +
         `            }\n` +
-        `            __connect(left.type === "net" ? __net(left.ref.h) : { ...left, pin: left.pin.h, key: left.defaultNetName + "_h", defaultNetName: left.defaultNetName + "_h" }, right.type === "net" ? __net(right.ref.h) : { ...right, pin: right.pin.h, key: right.defaultNetName + "_h", defaultNetName: right.defaultNetName + "_h" });\n` +
-        `            __connect(left.type === "net" ? __net(left.ref.l) : { ...left, pin: left.pin.l, key: left.defaultNetName + "_l", defaultNetName: left.defaultNetName + "_l" }, right.type === "net" ? __net(right.ref.l) : { ...right, pin: right.pin.l, key: right.defaultNetName + "_l", defaultNetName: right.defaultNetName + "_l" });\n` +
+        `            __connect(left.type === "net" ? __net(left.ref.h) : { ...left, pin: left.pin.h, key: left.defaultNetName, defaultNetName: left.defaultNetName }, right.type === "net" ? __net(right.ref.h) : { ...right, pin: right.pin.h, key: right.defaultNetName, defaultNetName: right.defaultNetName });\n` +
+        `            __connect(left.type === "net" ? __net(left.ref.l) : { ...left, pin: left.pin.l, key: left.defaultNetName + ".l", defaultNetName: left.defaultNetName + ".l" }, right.type === "net" ? __net(right.ref.l) : { ...right, pin: right.pin.l, key: right.defaultNetName + ".l", defaultNetName: right.defaultNetName + ".l" });\n` +
         `            return;\n` +
         `        }\n` +
         `        const leftNetGroup = left.type === "net" ? Boolean(left.ref.__netGroup) : Boolean(left.pin && left.pin.__pinNetGroup);\n` +
         `        const rightNetGroup = right.type === "net" ? Boolean(right.ref.__netGroup) : Boolean(right.pin && right.pin.__pinNetGroup);\n` +
         `        if (leftNetGroup || rightNetGroup) {\n` +
         `            if (!leftNetGroup || !rightNetGroup) {\n` +
-        `                throw new Error("Connection joins net group and net");\n` +
+        `                const groupExpression = leftNetGroup ? (left.type === "net" ? left.ref.name : left.key) : (right.type === "net" ? right.ref.name : right.key);\n` +
+        `                const signalExpression = leftNetGroup ? (right.type === "net" ? right.ref.value : right.key) : (left.type === "net" ? left.ref.value : left.key);\n` +
+        `                const groupType = leftNetGroup ? (left.type === "net" ? left.ref.type : left.pin.type) : (right.type === "net" ? right.ref.type : right.pin.type);\n` +
+        `                throw new Error(\`Cannot connect net<\${groupType}> "\${groupExpression}" directly to "\${signalExpression}". Connect a specific signal instead, for example "\${groupExpression}.SDA ~ \${signalExpression}".\`);\n` +
         `            }\n` +
         `            const leftType = left.type === "net" ? left.ref.type : left.pin.type;\n` +
         `            const rightType = right.type === "net" ? right.ref.type : right.pin.type;\n` +
         `            if (leftType !== rightType) {\n` +
-        `                throw new Error(\`Connection joins net groups of different types "\${leftType}" and "\${rightType}"\`);\n` +
+        `                throw new Error(\`Cannot connect net<\${leftType}> to net<\${rightType}>. Use matching group types on both sides.\`);\n` +
         `            }\n` +
         `            for (const signalName of netTypeSignals[leftType]) {\n` +
         `                __connect(left.type === "net" ? __net(left.ref[signalName]) : { ...left, pin: left.pin[signalName], key: left.defaultNetName + "_" + signalName, defaultNetName: left.defaultNetName + "_" + signalName }, right.type === "net" ? __net(right.ref[signalName]) : { ...right, pin: right.pin[signalName], key: right.defaultNetName + "_" + signalName, defaultNetName: right.defaultNetName + "_" + signalName });\n` +
@@ -2888,10 +3269,13 @@ function renderRuntimeHelpers() {
         `        if (left.type === "net" && right.type === "net") {\n` +
         `            if (left.ref.__netGroup || right.ref.__netGroup) {\n` +
         `                if (!left.ref.__netGroup || !right.ref.__netGroup) {\n` +
-        `                    throw new Error("Connection joins net group and net");\n` +
+        `                    const groupExpression = left.ref.__netGroup ? left.ref.value : right.ref.value;\n` +
+        `                    const signalExpression = left.ref.__netGroup ? right.ref.value : left.ref.value;\n` +
+        `                    const groupType = left.ref.__netGroup ? left.ref.type : right.ref.type;\n` +
+        `                    throw new Error(\`Cannot connect net<\${groupType}> "\${groupExpression}" directly to "\${signalExpression}". Connect a specific signal instead, for example "\${groupExpression}.SDA ~ \${signalExpression}".\`);\n` +
         `                }\n` +
         `                if (left.ref.type !== right.ref.type) {\n` +
-        `                    throw new Error(\`Connection joins net groups of different types "\${left.ref.type}" and "\${right.ref.type}"\`);\n` +
+        `                    throw new Error(\`Cannot connect net<\${left.ref.type}> to net<\${right.ref.type}>. Use matching group types on both sides.\`);\n` +
         `                }\n` +
         `                for (const signalName of netTypeSignals[left.ref.type]) {\n` +
         `                    __connect(__net(left.ref[signalName]), __net(right.ref[signalName]));\n` +
@@ -2899,8 +3283,16 @@ function renderRuntimeHelpers() {
         `                return;\n` +
         `            }\n` +
         `            if (!left.ref.__netRef || !right.ref.__netRef) {\n` +
+        `                const bridgeCandidate = !left.ref.__netRef ? left.ref : right.ref;\n` +
+        `                const bridgeName = bridgeCandidate && bridgeCandidate.__schrune && bridgeCandidate.__schrune.name ? bridgeCandidate.__schrune.name : bridgeCandidate && bridgeCandidate.constructor ? bridgeCandidate.constructor.name : "component";\n` +
+        `                const bridgePins = bridgeCandidate && bridgeCandidate.pins ? __leafPinPaths(bridgeCandidate.pins) : [];\n` +
+        `                if (bridgePins.length === 2) {\n` +
+        `                    throw new Error(\`Component "\${bridgeName}" is a bridge part. Use "~>" only when a two-pin part sits in the middle, for example "left ~> \${bridgeName} ~> right". If you meant a normal tie, use "~".\`);\n` +
+        `                }\n` +
         `                if (left.ref.__netRef || right.ref.__netRef) {\n` +
-        `                    throw new Error("Connection joins rail and net");\n` +
+        `                    const leftName = left.ref.__netRef ? left.ref.value : bridgeName;\n` +
+        `                    const rightName = right.ref.__netRef ? right.ref.value : bridgeName;\n` +
+        `                    throw new Error(\`Cannot connect a rail directly to a net-like endpoint "\${leftName} ~ \${rightName}". Use the rail side explicitly, for example "\${leftName}.h ~ \${rightName}" or "\${leftName}.l ~ \${rightName}".\`);\n` +
         `                }\n` +
         `                __connect(__net(left.ref.h), __net(right.ref.h));\n` +
         `                __connect(__net(left.ref.l), __net(right.ref.l));\n` +
@@ -2912,7 +3304,7 @@ function renderRuntimeHelpers() {
         `                return;\n` +
         `            }\n` +
         `            if (__isNamedNetRef(left.ref) && __isNamedNetRef(right.ref)) {\n` +
-        `                throw new Error(\`Connection joins nets "\${leftRoot.value}" and "\${rightRoot.value}"\`);\n` +
+        `                throw new Error(\`Cannot join two already-named nets "\${leftRoot.value}" and "\${rightRoot.value}". Rename one side or connect them earlier in the chain.\`);\n` +
         `            }\n` +
         `            if (__isNamedNetRef(left.ref)) {\n` +
         `                netAliases.set(rightRoot.value, leftRoot.value);\n` +
@@ -3051,20 +3443,46 @@ function renderRuntimeHelpers() {
 }
 
 function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTemplate.name) {
-    const statements = splitStatements(moduleTemplate.body);
+    const statements = splitStatementsWithLocations(moduleTemplate.body, moduleTemplate.bodyStart || 0);
     const { declarations, nameOverrides } = collectTopDeclarations(statements);
     const isTopLevel = functionName === "__module_top" || moduleTemplate.name === "top";
+    const parameterNetNames = new Set(moduleTemplate.parameters.filter((parameter) => parameter.kind === "net" && !parameter.type).map((parameter) => parameter.name));
+    const parameterNetGroups = new Map(moduleTemplate.parameters.filter((parameter) => parameter.kind === "net" && parameter.type).map((parameter) => [parameter.name, parameter.type]));
+    const parameterRailNames = new Set(moduleTemplate.parameters.filter((parameter) => parameter.kind === "rail").map((parameter) => parameter.name));
     const moduleContext = {
         ...context,
-        netNames: new Set(declarations.filter((declaration) => declaration.kind === "net").map((declaration) => declaration.name)),
-        netGroups: new Map(declarations.filter((declaration) => declaration.kind === "net" && declaration.type).map((declaration) => [declaration.name, declaration.type])),
-        railNames: new Set(declarations.filter((declaration) => declaration.kind === "rail").map((declaration) => declaration.name)),
+        netNames: new Set([...declarations.filter((declaration) => declaration.kind === "net" && !declaration.type).map((declaration) => declaration.name), ...parameterNetNames]),
+        netGroups: new Map([...declarations.filter((declaration) => declaration.kind === "net" && declaration.type).map((declaration) => [declaration.name, declaration.type]), ...parameterNetGroups]),
+        railNames: new Set([...declarations.filter((declaration) => declaration.kind === "rail").map((declaration) => declaration.name), ...parameterRailNames]),
     };
-    const parameters = moduleTemplate.parameters.join(", ");
+    const parameters = moduleTemplate.parameters.map((parameter) => `__param_${parameter.name}`).join(", ");
+    const parameterBindingLines = moduleTemplate.parameters.map((parameter) => {
+        if (parameter.kind === "val") {
+            return `    const ${parameter.name} = __param_${parameter.name};`;
+        }
+
+        if (parameter.kind === "rail") {
+            const highOverride = nameOverrides.get(`${parameter.name}.h`);
+            const lowOverride = nameOverrides.get(`${parameter.name}.l`);
+            return `    const ${parameter.name} = __bindRailParam(${jsString(parameter.name)}, __param_${parameter.name}, ${highOverride ? jsString(highOverride) : "undefined"}, ${lowOverride ? jsString(lowOverride) : "undefined"});`;
+        }
+
+        if (parameter.type) {
+            const groupOverride = nameOverrides.get(parameter.name);
+            const signalOverrides = Object.fromEntries(netTypeSignals(parameter.type)
+                .map((signalName) => [signalName, nameOverrides.get(`${parameter.name}.${signalName}`)])
+                .filter(([, value]) => value !== undefined));
+            return `    const ${parameter.name} = __bindNetGroupParam(${jsString(parameter.name)}, ${jsString(parameter.type)}, __param_${parameter.name}, ${groupOverride ? jsString(groupOverride) : "undefined"}, ${renderObjectLiteral(signalOverrides, 4)});`;
+        }
+
+        const override = nameOverrides.get(parameter.name);
+        return `    const ${parameter.name} = __bindNetParam(${jsString(parameter.name)}, __param_${parameter.name}, ${override ? jsString(override) : "undefined"});`;
+    });
     const declarationLines = declarations.map((declaration) => {
         if (declaration.kind === "net") {
             if (declaration.type) {
-                return `    const ${declaration.name} = __declareNetGroup(${jsString(declaration.name)}, ${jsString(declaration.type)});`;
+                const baseName = nameOverrides.get(declaration.name) || declaration.name;
+                return `    const ${declaration.name} = __declareNetGroup(${jsString(declaration.name)}, ${jsString(declaration.type)}, ${jsString(baseName)});`;
             }
             const finalName = nameOverrides.get(declaration.name) || declaration.defaultName;
             return `    const ${declaration.name} = __declareNet(${jsString(declaration.name)}, __scopeName(${jsString(finalName)}), ${isTopLevel && (nameOverrides.has(declaration.name) || Boolean(declaration.inlineAnchor))}, ${jsString(isTopLevel ? finalName : declaration.name)});`;
@@ -3076,10 +3494,15 @@ function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTe
         const lowName = nameOverrides.get(lowKey) || declaration.defaultLow;
         return `    const ${declaration.name} = __declareRail(${jsString(declaration.name)}, __scopeName(${jsString(highName)}), __scopeName(${jsString(lowName)}), ${isTopLevel && nameOverrides.has(highKey)}, ${isTopLevel && nameOverrides.has(lowKey)}, ${isTopLevel});`;
     });
-    const statementLines = renderStatements(statements, 4, moduleContext);
+    const statementLines = renderStatements(statements, 4, {
+        ...moduleContext,
+        filePath: moduleTemplate.filePath,
+        source: moduleTemplate.source || moduleTemplate.body,
+    });
 
     return [
         `function ${functionName}(${parameters}) {`,
+        ...parameterBindingLines,
         ...declarationLines,
         "",
         ...statementLines,
@@ -3091,22 +3514,23 @@ function renderModuleJavaScript(moduleTemplate, context, functionName = moduleTe
     ].join("\n");
 }
 
-function renderTopJavaScript(filePath) {
-    const { source, modules } = loadFile(filePath);
+function renderTopJavaScript(filePath, projectRoot = path.dirname(path.resolve(filePath))) {
+    const { source, modules } = loadFile(filePath, new Map(), projectRoot);
     const topModule = modules.get("top");
     if (!topModule) {
         throw new Error("No top module found");
     }
 
     const inputDir = path.dirname(filePath);
-    const includes = includedFiles(filePath);
-    const requireLines = includes.map((includePath) => {
-        const templateName = path.basename(includePath, ".schrune");
+    const includes = [...new Map(requiredFiles(filePath, new Set(), projectRoot)
+        .filter((requirement) => requirement.kind === "part")
+        .map((requirement) => [requirement.name, requirement])).values()];
+    const requireLines = includes.map(({ name: templateName, filePath: includePath }) => {
         const jsPath = path.join(path.dirname(includePath), `${templateName}.js`);
         const relativePath = `./${path.relative(inputDir, jsPath).replace(/\\/g, "/").replace(/\.js$/, "")}`;
         return `const ${templateName} = require(${jsString(relativePath)});`;
     });
-    const includeNames = new Set(includes.map((includePath) => path.basename(includePath, ".schrune")));
+    const includeNames = new Set(includes.map(({ name }) => name));
     const primitiveNames = primitiveNamesInModules([...modules.values()], includeNames);
     const primitiveRequireLines = [...new Set(primitiveNames)].map((name) => {
         const includePath = path.join(__dirname, "include", primitiveIncludeFileName(name));
@@ -3114,7 +3538,7 @@ function renderTopJavaScript(filePath) {
     });
     const moduleDefinitions = [...modules.values()]
         .filter((module) => module.name !== "top")
-        .map((module) => renderModuleJavaScript(module, {}));
+        .map((module) => renderModuleJavaScript(module, { filePath: module.filePath, source: module.source }));
 
     return [
         ...requireLines,
@@ -3126,7 +3550,7 @@ function renderTopJavaScript(filePath) {
         "",
         ...moduleDefinitions.map((module) => indentLines(module, 4)),
         moduleDefinitions.length ? "" : undefined,
-        indentLines(renderModuleJavaScript(topModule, {}, "__module_top"), 4),
+        indentLines(renderModuleJavaScript(topModule, { filePath, source }, "__module_top"), 4),
         "",
         "    __module_top();",
         "    return __finalize();",
@@ -3142,17 +3566,18 @@ function renderTopJavaScript(filePath) {
     ].filter((line) => line !== undefined).join("\n");
 }
 
-function renderModuleFileJavaScript(filePath) {
-    const { source, modules } = loadFile(filePath);
+function renderModuleFileJavaScript(filePath, projectRoot = path.dirname(path.resolve(filePath))) {
+    const { source, modules } = loadFile(filePath, new Map(), projectRoot);
     const inputDir = path.dirname(filePath);
-    const includes = includedFiles(filePath);
-    const requireLines = includes.map((includePath) => {
-        const templateName = path.basename(includePath, ".schrune");
+    const includes = [...new Map(requiredFiles(filePath, new Set(), projectRoot)
+        .filter((requirement) => requirement.kind === "part")
+        .map((requirement) => [requirement.name, requirement])).values()];
+    const requireLines = includes.map(({ name: templateName, filePath: includePath }) => {
         const jsPath = path.join(path.dirname(includePath), `${templateName}.js`);
         const relativePath = `./${path.relative(inputDir, jsPath).replace(/\\/g, "/").replace(/\.js$/, "")}`;
         return `const ${templateName} = require(${jsString(relativePath)});`;
     });
-    const includeNames = new Set(includes.map((includePath) => path.basename(includePath, ".schrune")));
+    const includeNames = new Set(includes.map(({ name }) => name));
     const primitiveNames = primitiveNamesInModules([...modules.values()], includeNames);
     const primitiveRequireLines = [...new Set(primitiveNames)].map((name) => {
         const includePath = path.join(__dirname, "include", primitiveIncludeFileName(name));
@@ -3166,8 +3591,8 @@ function renderModuleFileJavaScript(filePath) {
     const exportModule = modules.get(path.basename(filePath, ".schrune")) || moduleEntries[0];
     const helperDefinitions = moduleEntries
         .filter((module) => module.name !== exportModule.name)
-        .map((module) => renderModuleJavaScript(module, {}));
-    const exportDefinition = renderModuleJavaScript(exportModule, {});
+        .map((module) => renderModuleJavaScript(module, { filePath: module.filePath, source: module.source }));
+    const exportDefinition = renderModuleJavaScript(exportModule, { filePath: exportModule.filePath, source: exportModule.source });
 
     return [
         ...requireLines,
@@ -3193,10 +3618,10 @@ function step1OutputPath(sourceRoot, outputRoot, schrunePath) {
 function materializeStep1JavaScript(filePath, outputRoot) {
     const resolvedPath = path.resolve(filePath);
     const sourceRoot = path.dirname(resolvedPath);
-    const files = [resolvedPath, ...includedFiles(resolvedPath)];
+    const files = [...new Set([resolvedPath, ...requiredFiles(resolvedPath).map(({ filePath: requiredPath }) => requiredPath)])];
 
     for (const schrunePath of files) {
-        const { source, templates } = loadFile(schrunePath);
+        const { source, templates } = loadFile(schrunePath, new Map(), sourceRoot);
         const partName = path.basename(schrunePath, ".schrune");
         const partTemplate = templates.get(partName);
         const outputPath = step1OutputPath(sourceRoot, outputRoot, schrunePath);
@@ -3208,11 +3633,11 @@ function materializeStep1JavaScript(filePath, outputRoot) {
         }
 
         if (extractBlocks(source, "module", { allowParameters: true }).some((module) => module.name === "top")) {
-            fs.writeFileSync(outputPath, renderTopJavaScript(schrunePath));
+            fs.writeFileSync(outputPath, renderTopJavaScript(schrunePath, sourceRoot));
             continue;
         }
 
-        fs.writeFileSync(outputPath, renderModuleFileJavaScript(schrunePath));
+        fs.writeFileSync(outputPath, renderModuleFileJavaScript(schrunePath, sourceRoot));
     }
 }
 
@@ -3239,8 +3664,12 @@ function executeStep1JavaScript(filePath) {
 function usage() {
     return [
         "Usage:",
-        "  shrune build [--keep-js] [--no-parts-lock] <file.schrune>",
-        "  shrune add <CXXXX>",
+        "  shrune create",
+        "  shrune build [-l|--update-layout] [--keep-js] [--no-parts-lock] [file.schrune]",
+        "  shrune open-kicad",
+        "  shrune parts add <CXXXX>",
+        "  shrune parts install [-u|--update] [-a|--include-autogenerated]",
+        "  shrune tools jlc-bom [-n N]",
         "",
         "Compatibility:",
         "  shrune [--keep-js] <file.schrune>",
@@ -3254,24 +3683,285 @@ class UsageError extends Error {
     }
 }
 
+async function promptForProjectConfig() {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    });
+
+    try {
+        const projectName = (await rl.question("Project name: ")).trim();
+        const entryFile = (await rl.question("Entry file: ")).trim();
+
+        if (!projectName || !entryFile) {
+            throw new Error("Project name and entry file are required");
+        }
+
+        return { projectName, entryFile };
+    } finally {
+        rl.close();
+    }
+}
+
+function openPathWithDefaultApplication(filePath) {
+    const resolvedPath = path.resolve(filePath);
+    let command;
+    let args;
+
+    if (process.platform === "win32") {
+        command = "cmd";
+        args = ["/c", "start", "", resolvedPath];
+    } else if (process.platform === "darwin") {
+        command = "open";
+        args = [resolvedPath];
+    } else {
+        command = "xdg-open";
+        args = [resolvedPath];
+    }
+
+    return new Promise((resolve, reject) => {
+        const child = spawn(command, args, {
+            detached: true,
+            stdio: "ignore",
+        });
+        child.on("error", reject);
+        child.unref();
+        resolve();
+    });
+}
+
+function normalizeLcscPartReference(part) {
+    if (!part || typeof part !== "object") {
+        return undefined;
+    }
+
+    const lcsc = String(part.LCSC || part.lcsc || "").toUpperCase();
+    if (!lcsc) {
+        return undefined;
+    }
+
+    return {
+        ...part,
+        LCSC: lcsc,
+    };
+}
+
+function installedImportedPartExists(partsRoot, partName) {
+    if (!partName) {
+        return false;
+    }
+
+    const directory = path.join(partsRoot, partName);
+    return fs.existsSync(path.join(directory, `${partName}.schrune`))
+        && fs.existsSync(path.join(directory, `${partName}.kicad_sym`))
+        && fs.existsSync(path.join(directory, `${partName}.kicad_mod`));
+}
+
+function requireStatementForPart(baseDir, schrunePath) {
+    void baseDir;
+    const partName = path.basename(path.resolve(schrunePath), ".schrune");
+    return `@require("${partName}");`;
+}
+
+async function installProjectParts(project, options = {}) {
+    const target = resolveBuildTarget({ cwd: project.dir });
+    const projectPartsRoot = path.join(path.dirname(target.entryFilePath), "parts");
+    const autogeneratedPartsRoot = path.join(projectPartsRoot, "autogenerated");
+    const importer = options.addLcscPart || addLcscPart;
+    const manifestParts = Array.isArray(project.config.parts)
+        ? project.config.parts.map(normalizeLcscPartReference).filter(Boolean).map((part) => ({ ...part, __autogenerated: false }))
+        : [];
+    const queue = [...manifestParts];
+
+    if (options.includeAutogenerated) {
+        const lock = readPartsLock(target.entryFilePath);
+        for (const part of lock.parts || []) {
+            const normalized = normalizeLcscPartReference(part);
+            if (normalized) {
+                queue.push({ ...normalized, __autogenerated: true });
+            }
+        }
+    }
+
+    const uniqueQueue = [];
+    const seen = new Set();
+    for (const part of queue) {
+        if (seen.has(part.LCSC)) {
+            continue;
+        }
+        seen.add(part.LCSC);
+        uniqueQueue.push(part);
+    }
+
+    const installed = [];
+    options.onProgress && options.onProgress({ current: 0, total: uniqueQueue.length });
+    for (let index = 0; index < uniqueQueue.length; index++) {
+        const part = uniqueQueue[index];
+
+        const partsRoot = part.__autogenerated ? autogeneratedPartsRoot : projectPartsRoot;
+
+        if (!options.update && installedImportedPartExists(partsRoot, part.MPN || part.partName)) {
+            options.onProgress && options.onProgress({ current: index + 1, total: uniqueQueue.length, part, skipped: true });
+            continue;
+        }
+
+        const result = await importer(part.LCSC, {
+            cwd: path.dirname(target.entryFilePath),
+            partsDir: partsRoot,
+            updateExistingSchrune: options.update,
+            part,
+        });
+        installed.push(result);
+
+        if ((project.config.parts || []).some((entry) => normalizeLcscPartReference(entry)?.LCSC === result.lcsc)) {
+            project = findProjectConfigInDirectory(project.dir);
+            addPartToProjectConfig(project, {
+                MPN: result.partName,
+                LCSC: result.lcsc,
+            });
+        }
+        options.onProgress && options.onProgress({ current: index + 1, total: uniqueQueue.length, part, result });
+    }
+
+    return installed;
+}
+
 async function main() {
     const args = process.argv.slice(2);
-    const command = args[0] && !args[0].startsWith("--") && path.extname(args[0]) !== ".schrune"
+    const command = args[0] && !args[0].startsWith("-") && path.extname(args[0]) !== ".schrune"
         ? args.shift()
         : "build";
 
-    if (command === "add") {
-        const partNumber = args[0];
-        if (!partNumber) {
+    if (command === "create") {
+        const { projectName, entryFile } = await promptForProjectConfig();
+        const entryPath = path.resolve(process.cwd(), entryFile);
+        const projectPath = path.join(path.dirname(entryPath), PROJECT_FILE);
+
+        if (!fs.existsSync(entryPath)) {
+            throw new Error(`Entry file not found: ${entryFile}`);
+        }
+
+        writeProjectConfig(projectPath, {
+            name: projectName,
+            entry: relativeManifestPath(path.dirname(projectPath), entryPath),
+            parts: [],
+        });
+        console.log(colorize(`Created ${projectPath}`, "green", process.stdout));
+        return;
+    }
+
+    if (command === "parts") {
+        const subcommand = args.shift();
+        if (subcommand === "add") {
+            const partNumber = args[0];
+            if (!partNumber) {
+                throw new UsageError();
+            }
+
+            const project = findProjectConfig(process.cwd());
+            const baseDir = project ? project.dir : process.cwd();
+            const result = await addLcscPart(partNumber, { cwd: baseDir });
+            if (project) {
+                addPartToProjectConfig(project, {
+                    MPN: result.partName,
+                    LCSC: partNumber.toUpperCase(),
+                });
+            }
+            console.log(`Added ${result.partName}`);
+            console.log(`Pins: ${result.pins.length}`);
+            console.log(requireStatementForPart(baseDir, result.schrunePath));
+            if (!result.modelDownloaded) {
+                console.log("3D STEP model payload was not directly downloadable.");
+            }
+            return;
+        }
+
+        if (subcommand === "install") {
+            const project = findProjectConfigInDirectory(process.cwd());
+            if (!project) {
+                throw new Error(`No ${PROJECT_FILE} found in ${process.cwd()}`);
+            }
+
+            const update = args.includes("-u") || args.includes("--update");
+            const includeAutogenerated = args.includes("-a") || args.includes("--include-autogenerated");
+            const progress = createProgress();
+            progress.start("Installing parts");
+            let installed;
+            try {
+                installed = await installProjectParts(project, {
+                    update,
+                    includeAutogenerated,
+                    onProgress({ current, total }) {
+                        progress.update(`Installing parts (${current}/${total})`);
+                    },
+                });
+                progress.succeed("Installed parts");
+            } catch (error) {
+                progress.fail("Parts install failed");
+                throw error;
+            }
+            console.log(`Installed ${installed.length} part${installed.length === 1 ? "" : "s"}`);
+            return;
+        }
+
+        throw new UsageError();
+    }
+
+    if (command === "open-kicad") {
+        const target = resolveBuildTarget({ cwd: process.cwd() });
+        if (!target.project || !target.project.config.build || !target.project.config.build.kicadProject) {
+            throw new Error(`No KiCad project recorded in ${PROJECT_FILE}. Run a build first.`);
+        }
+
+        const projectPath = path.resolve(target.project.dir, target.project.config.build.kicadProject);
+        if (!fs.existsSync(projectPath)) {
+            throw new Error(`KiCad project not found: ${projectPath}`);
+        }
+
+        await openPathWithDefaultApplication(projectPath);
+        return;
+    }
+
+    if (command === "tools") {
+        const subcommand = args.shift();
+        if (subcommand !== "jlc-bom") {
             throw new UsageError();
         }
 
-        const result = await addLcscPart(partNumber);
-        console.log(`Added ${result.partName}`);
-        console.log(`Pins: ${result.pins.length}`);
-        if (!result.modelDownloaded) {
-            console.log("3D STEP model payload was not directly downloadable.");
+        let boardCount;
+        for (let index = 0; index < args.length; index++) {
+            const arg = args[index];
+            if (arg === "-n") {
+                const value = Number(args[index + 1]);
+                if (!Number.isInteger(value) || value <= 0) {
+                    throw new Error("Specify a positive integer after -n");
+                }
+                boardCount = value;
+                index++;
+                continue;
+            }
+
+            throw new UsageError();
         }
+
+        const progress = createProgress(process.stderr);
+        let report;
+        progress.start("Fetching JLC BOM data");
+        try {
+            report = await buildJlcBom({
+                cwd: process.cwd(),
+                boardCount: boardCount || 5,
+            });
+            progress.succeed("Fetched JLC BOM data");
+        } catch (error) {
+            progress.fail("JLC BOM fetch failed");
+            throw error;
+        }
+
+        process.stdout.write(renderJlcBomReport(report, {
+            showBreakdown: Number.isInteger(boardCount),
+            stream: process.stdout,
+        }));
         return;
     }
 
@@ -3281,14 +3971,20 @@ async function main() {
 
     const keepJs = args.includes("--keep-js");
     const noPartsLock = args.includes("--no-parts-lock");
-    const inputFile = args.find((arg) => arg !== "--keep-js" && arg !== "--no-parts-lock");
-    if (!inputFile || path.extname(inputFile) !== ".schrune") {
+    const updateLayout = args.includes("-l") || args.includes("--update-layout");
+    const buildFlags = new Set(["--keep-js", "--no-parts-lock", "-l", "--update-layout"]);
+    const inputFile = args.find((arg) => !buildFlags.has(arg));
+    if (inputFile && path.extname(inputFile) !== ".schrune") {
+        throw new UsageError();
+    }
+    if (args.some((arg) => arg.startsWith("-") && !buildFlags.has(arg))) {
         throw new UsageError();
     }
 
-    const inputPath = path.resolve(process.cwd(), inputFile);
+    const target = resolveBuildTarget({ cwd: process.cwd(), inputFile });
+    const inputPath = target.entryFilePath;
     if (!fs.existsSync(inputPath)) {
-        throw new Error(`File not found: ${inputFile}`);
+        throw new Error(`File not found: ${inputFile || inputPath}`);
     }
 
     const designatorState = readDesignatorState(inputPath);
@@ -3312,6 +4008,7 @@ async function main() {
         progress.start("Fetching components");
         const bom = await step3(inputPath, compiled, {
             noPartsLock,
+            projectName: target.projectName,
             onProgress({ current, total }) {
                 progress.update(`Fetching components (${current}/${total})`);
             },
@@ -3319,10 +4016,17 @@ async function main() {
         progress.succeed("Fetched components");
 
         progress.start("Sending to KiCad");
-        const result = writeKiCadFiles(inputPath, bom);
+        const result = writeKiCadFiles(inputPath, bom, { projectName: target.projectName, updateLayout });
         progress.succeed("Sent to KiCad");
 
         writeDesignatorState(inputPath, buildDesignatorState(result));
+        if (target.project) {
+            const nextConfig = {
+                ...target.project.config,
+                build: manifestBuildRecord(target.project.path, result),
+            };
+            writeProjectConfig(target.project.path, nextConfig);
+        }
 
         console.log(colorize(`Build successful: ${result.components.length} components, ${result.netList.size} nets.`, "green", process.stdout));
     } catch (error) {
@@ -3355,6 +4059,11 @@ module.exports = {
     writeDesignatorState,
     materializeStep1JavaScript,
     createProgress,
+    requireStatementForPart,
+    installProjectParts,
+    buildJlcBom,
+    openPathWithDefaultApplication,
+    renderJlcBomReport,
     UsageError,
     main,
 };
